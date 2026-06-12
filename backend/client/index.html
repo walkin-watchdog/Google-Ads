@@ -1,0 +1,1283 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Ads Dashboard</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-sankey"></script>
+    <!-- AG Grid -->
+    <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-alpine.css">
+    <!-- DateRangePicker -->
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/jquery/latest/jquery.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/momentjs/latest/moment.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/daterangepicker/daterangepicker.min.js"></script>
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/daterangepicker/daterangepicker.css" />
+
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="logo">
+                <img src="logo.png" alt="Zenseeo Logo" class="logo-icon">
+                <button id="pinSidebarBtn" class="pin-btn" title="Pin Sidebar">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="17" x2="12" y2="22"></line>
+                        <path
+                            d="M5 17h14v-1.76a2 2 0 0 0-.44-1.24l-2.78-3.56A2 2 0 0 1 15 9.2V5a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4.2a2 2 0 0 1-.78 1.24L5.44 14a2 2 0 0 0-.44 1.24z">
+                        </path>
+                    </svg>
+                </button>
+            </div>
+
+            <nav class="nav-menu">
+                <button class="nav-item active" data-tab="overview">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="14" width="7" height="7"></rect>
+                        <rect x="3" y="14" width="7" height="7"></rect>
+                    </svg>
+                    <span>Overview</span>
+                </button>
+                <button class="nav-item" data-tab="campaigns">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                        <polyline points="2 17 12 22 22 17"></polyline>
+                        <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                    <span>Campaigns</span>
+                </button>
+                <button class="nav-item" data-tab="ad-groups">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                        <rect x="9" y="9" width="6" height="6"></rect>
+                        <line x1="9" y1="1" x2="9" y2="4"></line>
+                        <line x1="15" y1="1" x2="15" y2="4"></line>
+                        <line x1="9" y1="20" x2="9" y2="23"></line>
+                        <line x1="15" y1="20" x2="15" y2="23"></line>
+                        <line x1="20" y1="9" x2="23" y2="9"></line>
+                        <line x1="20" y1="14" x2="23" y2="14"></line>
+                        <line x1="1" y1="9" x2="4" y2="9"></line>
+                        <line x1="1" y1="14" x2="4" y2="14"></line>
+                    </svg>
+                    <span>Ad Groups</span>
+                </button>
+                <button class="nav-item" data-tab="keywords">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                    </svg>
+                    <span>Keyword Discovery</span>
+                </button>
+                <button class="nav-item" data-tab="attribution">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="7" cy="7" r="3"></circle>
+                        <circle cx="17" cy="17" r="3"></circle>
+                        <path d="M10 7h4a3 3 0 0 1 3 3v4"></path>
+                        <path d="M7 10v4a3 3 0 0 0 3 3h4"></path>
+                    </svg>
+                    <span>Conversions</span>
+                </button>
+                <button class="nav-item" data-tab="rank">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 17l6-6 4 4 8-8"></path>
+                        <path d="M14 7h7v7"></path>
+                    </svg>
+                    <span>Rank</span>
+                </button>
+                <button class="nav-item" data-tab="proposals">
+                    <div class="proposal-badge-container"
+                        style="position: relative; display: flex; align-items: center; width: 100%;">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                        </svg>
+                        <span>Proposals</span>
+                        <span class="badge" id="proposalCountBadge">0</span>
+                    </div>
+                </button>
+            </nav>
+
+            <div class="sidebar-bottom">
+                <div class="meta-info">
+                    <p id="dateRangeText">Loading dates...</p>
+                    <p id="accountIdText">Loading account...</p>
+                    <p id="lastUpdated">Loading last update...</p>
+                </div>
+                <form class="logout-form" method="post" action="/auth/logout">
+                    <button class="logout-btn" type="submit" title="Close dashboard session">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                            <polyline points="16 17 21 12 16 7"></polyline>
+                            <line x1="21" y1="12" x2="9" y2="12"></line>
+                        </svg>
+                        <span>Log out</span>
+                    </button>
+                </form>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-header">
+                <button class="mobile-nav-toggle" id="mobileNavToggle">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="3" y1="12" x2="21" y2="12"></line>
+                        <line x1="3" y1="6" x2="21" y2="6"></line>
+                        <line x1="3" y1="18" x2="21" y2="18"></line>
+                    </svg>
+                </button>
+                <div class="header-title">
+                    <h1 id="pageTitle">Overview</h1>
+                </div>
+
+                <div class="header-actions">
+                    <div class="theme-switcher">
+                        <button class="theme-btn active" data-theme="system" title="System Theme">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                                <line x1="8" y1="21" x2="16" y2="21"></line>
+                                <line x1="12" y1="17" x2="12" y2="21"></line>
+                            </svg>
+                        </button>
+                        <button class="theme-btn" data-theme="light" title="Light Theme">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="5"></circle>
+                                <line x1="12" y1="1" x2="12" y2="3"></line>
+                                <line x1="12" y1="21" x2="12" y2="23"></line>
+                                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                                <line x1="1" y1="12" x2="3" y2="12"></line>
+                                <line x1="21" y1="12" x2="23" y2="12"></line>
+                                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                            </svg>
+                        </button>
+                        <button class="theme-btn" data-theme="dark" title="Dark Theme">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="global-filters">
+                        <div class="filter-group">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                                <polyline points="2 17 12 22 22 17"></polyline>
+                                <polyline points="2 12 12 17 22 12"></polyline>
+                            </svg>
+                            <select id="globalCampaignFilter" class="styled-select header-select">
+                                <option value="All">All Campaigns</option>
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                                <rect x="9" y="9" width="6" height="6"></rect>
+                                <line x1="9" y1="1" x2="9" y2="4"></line>
+                                <line x1="15" y1="1" x2="15" y2="4"></line>
+                                <line x1="9" y1="20" x2="9" y2="20"></line>
+                                <line x1="15" y1="20" x2="15" y2="20"></line>
+                                <line x1="20" y1="9" x2="23" y2="9"></line>
+                                <line x1="20" y1="14" x2="23" y2="14"></line>
+                                <line x1="1" y1="9" x2="4" y2="9"></line>
+                                <line x1="1" y1="14" x2="4" y2="14"></line>
+                            </svg>
+                            <select id="globalAdGroupFilter" class="styled-select header-select">
+                                <option value="All">All Ad Groups</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="dateRangePicker" class="date-picker-btn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                            <line x1="16" y1="2" x2="16" y2="6"></line>
+                            <line x1="8" y1="2" x2="8" y2="6"></line>
+                            <line x1="3" y1="10" x2="21" y2="10"></line>
+                        </svg>
+                        <span>Select Date Range</span>
+                    </div>
+                    <button id="refreshBtn" class="refresh-header-btn" title="Refresh Dashboard Data">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="refresh-icon">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <polyline points="1 20 1 14 7 14"></polyline>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <div class="tab-content active" id="tab-overview">
+                <!-- Global KPI Grid (Unaffected by comparison) -->
+                <div class="kpi-grid" id="globalKpiGrid" style="margin-bottom: 2rem;">
+                    <!-- Populated by JS -->
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card glass-card span-full lead-funnel-card">
+                        <div class="card-header">
+                            <h3>Lead Funnel</h3>
+                        </div>
+                        <div id="leadFunnel" class="lead-funnel">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card glass-card span-full">
+                        <div class="card-header" style="flex-direction: column; align-items: stretch; gap: 1rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <h3>Performance Comparison</h3>
+                            </div>
+                            <div class="comparison-controls"
+                                style="display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap;">
+                                <div style="flex: 1; min-width: 200px;">
+                                    <label
+                                        style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">Compare
+                                        this period...</label>
+                                    <input type="text" id="currentPeriodPicker" class="styled-select"
+                                        style="width: 100%;">
+                                </div>
+                                <div style="flex: 1; min-width: 200px;">
+                                    <label
+                                        style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">...against
+                                        this period</label>
+                                    <input type="text" id="previousPeriodPicker" class="styled-select"
+                                        style="width: 100%;">
+                                </div>
+                                <button id="applyComparisonBtn" class="btn btn-primary"
+                                    style="margin-top: 0; white-space: nowrap;">Apply</button>
+                            </div>
+                        </div>
+                        <div style="padding: 1.5rem; padding-bottom: 0;">
+                            <div class="kpi-grid" id="kpiGrid" style="margin-bottom: 1.5rem;">
+                                <!-- Populated by JS -->
+                            </div>
+                        </div>
+                        <div class="chart-container"
+                            style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 1.5rem;">
+                            <canvas id="comparisonChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>30-Day Trends</h3>
+                            <select id="trendMetricSelect" class="styled-select" style="margin-left: auto;">
+                                <option value="spend">Spend & Conversions</option>
+                                <option value="cpa">CPA</option>
+                                <option value="traffic">Clicks & Impressions</option>
+                            </select>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="trendChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Device Performance</h3>
+                        </div>
+                        <div class="chart-container" style="height: 300px;">
+                            <canvas id="deviceChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full" id="timePerformanceCard">
+                        <div class="card-header"
+                            style="flex-direction: column; align-items: stretch; border-bottom: none; gap: 1rem; padding-bottom: 0;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <h3>Your performance by day of week and time of day</h3>
+                                <select id="dayHourMetricSelect" class="styled-select" style="margin-left: auto;">
+                                    <option value="clicks">Clicks</option>
+                                    <option value="impressions">Impressions</option>
+                                    <option value="conversions">Conversions</option>
+                                    <option value="spend">Cost</option>
+                                    <option value="ctr">CTR</option>
+                                    <option value="avgCpc">Avg. CPC</option>
+                                    <option value="cpa">Cost / conv.</option>
+                                </select>
+                            </div>
+                            <div class="time-tabs"
+                                style="display: flex; gap: 2rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0;">
+                                <button class="time-tab active" data-target="tab-day"
+                                    style="background: none; border: none; border-bottom: 2px solid var(--primary); padding: 0.5rem 1rem; color: var(--primary); cursor: pointer; font-weight: 500;">Day</button>
+                                <button class="time-tab" data-target="tab-dayhour"
+                                    style="background: none; border: none; border-bottom: 2px solid transparent; padding: 0.5rem 1rem; color: var(--text-muted); cursor: pointer; font-weight: 500;">Day
+                                    & hour</button>
+                                <button class="time-tab" data-target="tab-hour"
+                                    style="background: none; border: none; border-bottom: 2px solid transparent; padding: 0.5rem 1rem; color: var(--text-muted); cursor: pointer; font-weight: 500;">Hour</button>
+                            </div>
+                        </div>
+                        <div class="card-body" style="padding: 1.5rem;">
+                            <div id="tab-day" class="time-tab-content active" style="height: 350px;">
+                                <canvas id="dayHorizontalChart"></canvas>
+                            </div>
+                            <div id="tab-dayhour" class="time-tab-content" style="display: none; overflow-x: auto;">
+                                <div id="dayHourHeatmap" style="min-width: 600px;"></div>
+                            </div>
+                            <div id="tab-hour" class="time-tab-content" style="height: 350px; display: none;">
+                                <canvas id="hourVerticalChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <!-- AI Insights -->
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Diagnosis</h3>
+                        </div>
+                        <div class="insights-grid" id="insightsGrid">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-campaigns">
+                <div class="dashboard-grid">
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Campaign Efficiency (Spend vs CPA)</h3>
+                        </div>
+                        <div class="chart-container" style="height: 350px;">
+                            <canvas id="campaignBubbleChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card glass-card span-full">
+                    <div class="card-header">
+                        <h3>Campaign Performance</h3>
+                        <div class="grid-controls" style="margin-left: auto;">
+                            <button class="btn btn-secondary btn-sm" onclick="saveView('campaigns')">Save View</button>
+                            <button class="btn btn-secondary btn-sm" onclick="loadView('campaigns')">Load View</button>
+                            <input type="text" class="table-search styled-select" placeholder="Search campaigns..."
+                                data-target="campaignsTable">
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <div id="grid-campaigns" class="ag-theme-alpine" style="height: 500px; width: 100%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-ad-groups">
+                <div class="card glass-card span-full">
+                    <div class="card-header">
+                        <h3>Ad Group Performance</h3>
+                        <div class="grid-controls" style="margin-left: auto;">
+                            <button class="btn btn-secondary btn-sm" onclick="saveView('adGroups')">Save View</button>
+                            <button class="btn btn-secondary btn-sm" onclick="loadView('adGroups')">Load View</button>
+                            <input type="text" class="table-search styled-select" placeholder="Search ad groups..."
+                                data-target="grid-adGroups">
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <div id="grid-adGroups" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-keywords">
+                <div class="keyword-subtabs" role="tablist" aria-label="Keywords and discovery sections">
+                    <button class="keyword-subtab active" data-keyword-subtab="active">Keywords</button>
+                    <button class="keyword-subtab" data-keyword-subtab="negatives">Negative Keywords</button>
+                    <button class="keyword-subtab" data-keyword-subtab="search-terms">Search Terms</button>
+                    <button class="keyword-subtab" data-keyword-subtab="discovery">Discovery</button>
+                    <button class="keyword-subtab" data-keyword-subtab="insights">Insights</button>
+                </div>
+
+                <div class="keyword-subpanel active" id="keyword-subtab-active">
+                    <div class="keyword-metric-grid" id="keywordSummary"></div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card">
+                            <div class="card-header">
+                                <h3>Keyword Efficiency (CPC vs Conv. Rate)</h3>
+                            </div>
+                            <div class="chart-container" style="height: 350px;">
+                                <canvas id="keywordScatterChart"></canvas>
+                            </div>
+                        </div>
+
+                        <div class="card glass-card">
+                            <div class="card-header">
+                                <h3>Quality Score Distribution</h3>
+                            </div>
+                            <div class="chart-container" style="height: 350px;">
+                                <canvas id="qsDoughnutChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
+                        <div class="card-header">
+                            <h3>Keywords</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('allKeywords')">Save View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('allKeywords')">Load View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search keywords..."
+                                    data-target="allKeywordsTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-allKeywords" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
+                        <div class="card-header">
+                            <h3>Keyword Performance</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('keywords')">Save
+                                    View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('keywords')">Load
+                                    View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search keywords..."
+                                    data-target="keywordsTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-keywords" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="keyword-subpanel" id="keyword-subtab-negatives">
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Negative Keywords</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('negatives')">Save View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('negatives')">Load View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search negatives..."
+                                    data-target="negativesTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-negatives" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="keyword-subpanel" id="keyword-subtab-search-terms">
+                    <div class="keyword-metric-grid" id="searchTermSummary"></div>
+                    <p style="margin: 0.25rem 0 0.75rem; color: var(--text-muted); font-size: 0.83rem;">
+                        Read-only Google Ads search term performance. Low-volume queries may be hidden by Google.
+                    </p>
+                    <div class="keyword-action-grid" id="searchTermActionGroups"></div>
+
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Search Terms</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('searchTerms')">Save
+                                    View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('searchTerms')">Load
+                                    View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search terms..."
+                                    data-target="searchTermsTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-searchTerms" class="ag-theme-alpine" style="height: 500px; width: 100%;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+                <div class="keyword-subpanel" id="keyword-subtab-discovery">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full keyword-planner-card">
+                            <div class="card-header">
+                                <h3>Keyword Planner Explorer</h3>
+                                <span class="badge" id="keywordPlannerStatusBadge">Not loaded</span>
+                            </div>
+                            <div class="planner-explorer-surface">
+                                <div class="planner-title-row">
+                                    <h2>Discover new keywords</h2>
+                                </div>
+                                <div class="planner-mode-tabs" role="tablist" aria-label="Keyword Planner seed type">
+                                    <button type="button" class="planner-mode-tab active" id="plannerModeKeywordsTab"
+                                        data-planner-mode="keywords" role="tab" aria-selected="true"
+                                        aria-controls="plannerModeKeywords">Start with keywords</button>
+                                    <button type="button" class="planner-mode-tab" id="plannerModeWebsiteTab"
+                                        data-planner-mode="website" role="tab" aria-selected="false"
+                                        aria-controls="plannerModeWebsite">Start with a website</button>
+                                </div>
+                                <div class="planner-content-grid">
+                                    <div class="planner-input-column">
+                                        <section class="planner-mode-panel active" id="plannerModeKeywords"
+                                            data-planner-panel="keywords" role="tabpanel"
+                                            aria-labelledby="plannerModeKeywordsTab">
+                                            <label class="planner-field planner-field--large">
+                                                <span>Enter products or services closely related to your business</span>
+                                                <span class="planner-input-shell planner-input-shell--textarea">
+                                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                                                        stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                                        stroke-linejoin="round" aria-hidden="true">
+                                                        <circle cx="11" cy="11" r="7"></circle>
+                                                        <line x1="16.65" y1="16.65" x2="21" y2="21"></line>
+                                                    </svg>
+                                                    <textarea id="keywordPlannerSeedInput" class="planner-textarea"
+                                                        placeholder='Try "meal delivery" or "leather boots"'></textarea>
+                                                </span>
+                                            </label>
+                                            <label class="planner-field planner-field--optional">
+                                                <span>Enter a site to filter unrelated keywords</span>
+                                                <span class="planner-input-shell">
+                                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                                                        stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                                        stroke-linejoin="round" aria-hidden="true">
+                                                        <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4.93"></path>
+                                                        <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L13 19.07"></path>
+                                                    </svg>
+                                                    <input id="keywordPlannerFilterUrlInput" type="url"
+                                                        placeholder="https://">
+                                                </span>
+                                            </label>
+                                        </section>
+
+                                        <section class="planner-mode-panel" id="plannerModeWebsite"
+                                            data-planner-panel="website" role="tabpanel"
+                                            aria-labelledby="plannerModeWebsiteTab" hidden>
+                                            <label class="planner-field planner-field--large">
+                                                <span>Enter a website or a page to find keywords that match your site</span>
+                                                <span class="planner-input-shell">
+                                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+                                                        stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                                        stroke-linejoin="round" aria-hidden="true">
+                                                        <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4.93"></path>
+                                                        <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07L13 19.07"></path>
+                                                    </svg>
+                                                    <input id="keywordPlannerWebsiteUrlInput" type="url"
+                                                        placeholder="https://">
+                                                </span>
+                                                <small>For example, domain.com (website) or domain.com/page (webpage)</small>
+                                            </label>
+                                            <div class="planner-radio-stack" role="radiogroup"
+                                                aria-label="Website keyword source scope">
+                                                <label class="planner-radio">
+                                                    <input type="radio" name="keywordPlannerWebsiteScope" value="site"
+                                                        checked>
+                                                    <span>Use the entire site</span>
+                                                </label>
+                                                <label class="planner-radio">
+                                                    <input type="radio" name="keywordPlannerWebsiteScope" value="page">
+                                                    <span>Use only this page</span>
+                                                </label>
+                                            </div>
+                                        </section>
+
+                                        <div class="planner-targeting-row" aria-label="Keyword Planner targeting">
+                                            <label>
+                                                <span>Language</span>
+                                                <select id="keywordPlannerLanguageSelect">
+                                                    <option value="languageConstants/1000" selected>English (default)</option>
+                                                    <option value="languageConstants/1023">Hindi</option>
+                                                    <option value="languageConstants/1098">Malayalam</option>
+                                                    <option value="languageConstants/1130">Tamil</option>
+                                                    <option value="languageConstants/1041">Urdu</option>
+                                                </select>
+                                            </label>
+                                            <label>
+                                                <span>Location</span>
+                                                <select id="keywordPlannerLocationSelect">
+                                                    <option value="geoTargetConstants/2356" selected>India</option>
+                                                    <option value="geoTargetConstants/2840">United States</option>
+                                                    <option value="geoTargetConstants/2826">United Kingdom</option>
+                                                    <option value="geoTargetConstants/2124">Canada</option>
+                                                    <option value="geoTargetConstants/2036">Australia</option>
+                                                    <option value="geoTargetConstants/2702">Singapore</option>
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        <div class="planner-action-row">
+                                            <button id="runKeywordPlannerBtn" class="btn btn-primary" disabled>Get results</button>
+                                            <span id="keywordPlannerValidation" class="planner-validation"
+                                                aria-live="polite">Enter at least one keyword to continue.</span>
+                                        </div>
+                                    </div>
+                                    <aside class="planner-help-column">
+                                        <div class="planner-help-copy active" data-planner-help="keywords">
+                                            <p>Try not to be too specific or general. For example, "meal delivery" is
+                                                better than "meals" for a food delivery business.</p>
+                                            <a href="https://support.google.com/google-ads/answer/6325025"
+                                                target="_blank" rel="noopener">Learn more</a>
+                                            <p>Using your site will filter out services, products, or brands that you
+                                                do not offer.</p>
+                                        </div>
+                                        <div class="planner-help-copy" data-planner-help="website" hidden>
+                                            <p>Use a website as a source of keywords.</p>
+                                            <p>The entire site option sends the domain as a site seed. The page option
+                                                sends the entered URL as a page seed.</p>
+                                        </div>
+                                    </aside>
+                                </div>
+                            </div>
+                            <div class="planner-summary-grid" id="keywordPlannerSummary"></div>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Opportunity Map</h3>
+                        </div>
+                        <div class="chart-container" style="height: 360px;">
+                            <canvas id="plannerOpportunityChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
+                        <div class="card-header">
+                            <h3>Keyword Planner Ideas</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('keywordPlannerIdeas')">Save
+                                    View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('keywordPlannerIdeas')">Load
+                                    View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search ideas..."
+                                    data-target="keywordPlannerIdeasTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-keywordPlannerIdeas" class="ag-theme-alpine"
+                                style="height: 600px; width: 100%;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="keyword-subpanel" id="keyword-subtab-insights">
+                    <div class="keyword-metric-grid" id="keywordUniverseSummary"></div>
+
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
+                        <div class="card-header">
+                            <h3>Keyword Universe Coverage</h3>
+                        </div>
+                        <div class="chart-container" style="height: 330px;">
+                            <canvas id="keywordUniverseChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
+                        <div class="card-header">
+                            <h3>Combined Keyword Universe</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('keywordUniverse')">Save
+                                    View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('keywordUniverse')">Load
+                                    View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search universe..."
+                                    data-target="keywordUniverseTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-keywordUniverse" class="ag-theme-alpine" style="height: 600px; width: 100%;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-attribution">
+                <div class="attribution-subtabs" role="tablist" aria-label="Attribution sections">
+                    <button class="attribution-subtab active" data-attribution-subtab="review">
+                        <span>📋 Lead Review</span>
+                        <span class="badge" id="leadAttributionBadge" style="margin-left: 0.25rem;">0 leads</span>
+                    </button>
+                    <button class="attribution-subtab" data-attribution-subtab="quality">📊 Lead Quality</button>
+                    <button class="attribution-subtab" data-attribution-subtab="journeys">🔀 Journeys</button>
+                    <button class="attribution-subtab" data-attribution-subtab="gads">
+                        <span>🎯 Conversions</span>
+                        <span class="badge" id="attributionBadge" style="margin-left: 0.25rem;">0 rows</span>
+                    </button>
+                </div>
+
+                <!-- Sub-tab 1: Lead Review -->
+                <div class="attribution-subpanel active" id="attr-subtab-review">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>First-Party Lead Review</h3>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button id="downloadOfflineConversionsBtn" class="btn btn-secondary btn-sm">Download
+                                        Offline CSV</button>
+                                </div>
+                            </div>
+                            <div class="insights-grid" id="leadAttributionSummary"></div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Incoming Lead Review & Activity</h3>
+                                <div class="grid-controls lead-review-controls" style="margin-left: auto;">
+                                    <button id="downloadLeadReviewCsvBtn"
+                                        class="btn btn-secondary btn-sm lead-review-export-btn" type="button"
+                                        title="Export all currently filtered lead review rows">
+                                        <span class="lead-export-label">Export Lead CSV</span>
+                                        <span class="lead-export-count" id="leadReviewCsvCount">0</span>
+                                    </button>
+                                    <input type="text" class="table-search styled-select" placeholder="Search leads..."
+                                        data-target="grid-leadReview">
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-leadReview" class="ag-theme-alpine" style="height: 560px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub-tab 2: Lead Quality -->
+                <div class="attribution-subpanel" id="attr-subtab-quality">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Lead Quality by Campaign</h3>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-leadCampaigns" class="ag-theme-alpine"
+                                    style="height: 300px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Lead Quality by Search Term / Keyword</h3>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-leadSearchTerms" class="ag-theme-alpine"
+                                    style="height: 300px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub-tab 3: Journeys -->
+                <div class="attribution-subpanel" id="attr-subtab-journeys">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Lead Source Paths</h3>
+                            </div>
+                            <div class="insights-grid" id="leadJourneySummary"></div>
+                            <div class="lead-journey-map-shell">
+                                <div class="lead-journey-map-main">
+                                    <div class="lead-journey-map-title">
+                                        <span>What people did before review</span>
+                                        <small>Captured lead actions to current status</small>
+                                    </div>
+                                    <div class="chart-container lead-journey-map-canvas">
+                                        <canvas id="leadJourneyMapChart"></canvas>
+                                    </div>
+                                </div>
+                                <div class="lead-journey-map-side" id="leadJourneyMapDetails"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Repeated Lead Actions</h3>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-leadActionOverlaps" class="ag-theme-alpine"
+                                    style="height: 300px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub-tab 4: Conversions -->
+                <div class="attribution-subpanel" id="attr-subtab-gads">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Conversions</h3>
+                            </div>
+                            <div class="insights-grid" id="attributionSummary"></div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Search to Conversion Path</h3>
+                            </div>
+                            <div class="sankey-legend"
+                                style="padding: 1rem 1.5rem; display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 0.75rem; border-bottom: 1px solid var(--border-light); background: rgba(0,0,0,0.02); font-size: 0.85rem;">
+                                <div
+                                    style="display: flex; align-items: center; gap: 0.4rem; color: var(--text-secondary);">
+                                    <span
+                                        style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #3b82f6;"></span>
+                                    <strong>Search Term</strong> <span
+                                        style="color: var(--text-muted); font-size: 0.8rem;">(What users typed)</span>
+                                </div>
+                                <span style="color: var(--text-muted); font-weight: bold; margin: 0 0.25rem;">➔</span>
+                                <div
+                                    style="display: flex; align-items: center; gap: 0.4rem; color: var(--text-secondary);">
+                                    <span
+                                        style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #8b5cf6;"></span>
+                                    <strong>Keyword</strong> <span
+                                        style="color: var(--text-muted); font-size: 0.8rem;">(What you bid on)</span>
+                                </div>
+                                <span style="color: var(--text-muted); font-weight: bold; margin: 0 0.25rem;">➔</span>
+                                <div
+                                    style="display: flex; align-items: center; gap: 0.4rem; color: var(--text-secondary);">
+                                    <span
+                                        style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981;"></span>
+                                    <strong>Conversion Action</strong> <span
+                                        style="color: var(--text-muted); font-size: 0.8rem;">(Conversion Action)</span>
+                                </div>
+                            </div>
+                            <div class="chart-container sankey-container">
+                                <div class="sankey-scroll-inner">
+                                    <canvas id="sankeyChart"></canvas>
+                                </div>
+                            </div>
+                            <div id="sankeyMobilePaths" class="sankey-mobile-paths"></div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Conversion by Search Term</h3>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm"
+                                        onclick="saveView('conversionAttribution')">Save View</button>
+                                    <button class="btn btn-secondary btn-sm"
+                                        onclick="loadView('conversionAttribution')">Load View</button>
+                                    <input type="text" class="table-search styled-select"
+                                        placeholder="Search attribution..." data-target="conversionAttributionTable">
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-conversionAttribution" class="ag-theme-alpine"
+                                    style="height: 400px; width: 100%;"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Conversions by Actions</h3>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm"
+                                        onclick="saveView('conversionActions')">Save View</button>
+                                    <button class="btn btn-secondary btn-sm"
+                                        onclick="loadView('conversionActions')">Load View</button>
+                                    <input type="text" class="table-search styled-select"
+                                        placeholder="Search actions..." data-target="conversionActionsTable">
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-conversionActions" class="ag-theme-alpine"
+                                    style="height: 300px; width: 100%;"></div>
+                            </div>
+                        </div>
+                    </div>
+
+
+                </div>
+            </div>
+
+            <div class="tab-content" id="tab-rank">
+                <div class="rank-subtabs" role="tablist" aria-label="Rank and auction sections">
+                    <button class="rank-subtab active" data-rank-subtab="share">📊 Impression Share</button>
+                    <button class="rank-subtab" data-rank-subtab="competitors">👥 Competitors</button>
+                    <button class="rank-subtab" data-rank-subtab="auction">📈 Auction Insights</button>
+                    <button class="rank-subtab" data-rank-subtab="landing">📄 Landing Pages</button>
+                </div>
+
+                <!-- Sub-tab 1: Impression Share -->
+                <div class="rank-subpanel active" id="rank-subtab-share">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Budget vs Rank Constraints</h3>
+                            </div>
+                            <div class="insights-grid" id="rankSummary"></div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid" style="margin-top: 1.5rem;">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Impression Share by Campaign (Lost to Budget vs Rank)</h3>
+                            </div>
+                            <div class="chart-container" style="height: 300px;">
+                                <canvas id="impressionShareChart"></canvas>
+                            </div>
+                        </div>
+
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Impression Share over Time</h3>
+                            </div>
+                            <div class="chart-container" style="height: 300px;">
+                                <canvas id="impressionShareTimeChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub-tab 2: Competitors -->
+                <div class="rank-subpanel" id="rank-subtab-competitors">
+                    <div class="dashboard-grid" style="margin-bottom: 1.5rem;">
+                        <div class="card glass-card span-full"
+                            style="border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.02);">
+                            <div class="card-header"
+                                style="border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 1rem;">
+                                <h3 style="color: var(--danger); display: flex; align-items: center; gap: 0.5rem;">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path
+                                            d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z">
+                                        </path>
+                                        <line x1="12" y1="9" x2="12" y2="13"></line>
+                                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                                    </svg>
+                                    Competitor Waste Analysis
+                                </h3>
+                            </div>
+                            <div style="padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem;">
+                                <p style="color: var(--text-muted); font-size: 0.9rem; margin: 0; line-height: 1.4;">
+                                    Analysis of ad spend on search terms containing competitor brand names (like
+                                    <em>Wati, AiSensy, Interakt</em>). Users searching for competitors are typically
+                                    high-intent but seeking someone else, making these clicks higher-risk.
+                                </p>
+                                <div class="kpi-grid" id="competitorWasteGrid" style="margin-bottom: 0;">
+                                    <!-- Populated by JS -->
+                                </div>
+                                <div id="competitorWasteRecommendation">
+                                    <!-- Populated by JS -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Competitor Volume & Share</h3>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm" onclick="saveView('competitors')">Save
+                                        View</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="loadView('competitors')">Load
+                                        View</button>
+                                    <input type="text" class="table-search styled-select"
+                                        placeholder="Search competitors..." data-target="competitorTable">
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-competitors" class="ag-theme-alpine" style="height: 400px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Quality Score</h3>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm" onclick="saveView('qualityScore')">Save
+                                        View</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="loadView('qualityScore')">Load
+                                        View</button>
+                                    <input type="text" class="table-search styled-select"
+                                        placeholder="Search keywords..." data-target="qualityScoreTable">
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-qualityScore" class="ag-theme-alpine" style="height: 400px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub-tab 3: Auction Insights -->
+                <div class="rank-subpanel" id="rank-subtab-auction">
+                    <div class="dashboard-grid" style="margin-bottom: 1.5rem;">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Auction Sheet Settings</h3>
+                                <div class="grid-controls" style="margin-left: auto; gap: 0.5rem; display: flex;">
+                                    <button id="editAuctionSettingsBtn" class="btn btn-secondary btn-sm">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                                            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
+                                        </svg>
+                                        Edit Settings
+                                    </button>
+                                    <button id="saveAuctionSettingsBtn" class="btn btn-primary btn-sm" style="display: none;">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;">
+                                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                                            <polyline points="7 3 7 8 15 8"></polyline>
+                                        </svg>
+                                        Save Sheet Names
+                                    </button>
+                                    <button id="cancelAuctionSettingsBtn" class="btn btn-secondary btn-sm" style="display: none;">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="auction-settings-shell" id="auctionSettingsShell">
+                                <div id="auctionSheetSettingsStatus"></div>
+                                <div id="auctionSheetSettingsForm" class="auction-settings-table-wrapper"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full">
+                            <div class="card-header">
+                                <h3>Auction Insights</h3>
+                                <span class="scope-badge scope-badge--account"
+                                    title="Account, campaign, and ad-group scopes depend on the configured Google Sheet names.">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                        <line x1="12" y1="16" x2="12" y2="12"></line>
+                                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                                    </svg>
+                                    Sheets-backed scopes
+                                </span>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm" onclick="saveView('auctionInsights')">Save
+                                        View</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="loadView('auctionInsights')">Load
+                                        View</button>
+                                    <input type="text" class="table-search styled-select"
+                                        placeholder="Search domains..." data-target="auctionInsightsTable">
+                                </div>
+                            </div>
+                            <div class="auction-insights-shell">
+                                <div id="auctionInsightsSummary" class="auction-summary-grid"></div>
+                                <div class="auction-visual-grid">
+                                    <div class="auction-panel auction-panel-wide">
+                                        <div class="auction-panel-title">
+                                            <span>Auction trend over time</span>
+                                            <span class="auction-panel-meta">You vs top rivals by impression
+                                                share</span>
+                                        </div>
+                                        <div class="chart-container auction-line-container">
+                                            <canvas id="auctionInsightsTrendChart"></canvas>
+                                        </div>
+                                    </div>
+                                    <div class="auction-panel">
+                                        <div class="auction-panel-title">
+                                            <span>Domain pressure mix</span>
+                                            <span class="auction-panel-meta">Top rivals by observed share</span>
+                                        </div>
+                                        <div class="chart-container auction-chart-container">
+                                            <canvas id="auctionInsightsChart"></canvas>
+                                        </div>
+                                    </div>
+                                    <div class="auction-panel">
+                                        <div class="auction-panel-title">
+                                            <span>Rival pressure leaders</span>
+                                            <span class="auction-panel-meta">Share, overlap, position</span>
+                                        </div>
+                                        <div id="auctionPressureList" class="auction-pressure-list"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="table-responsive">
+                                <div id="grid-auctionInsights" class="ag-theme-alpine"
+                                    style="height: 400px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sub-tab 4: Landing Pages -->
+                <div class="rank-subpanel" id="rank-subtab-landing">
+                    <div class="dashboard-grid">
+                        <div class="card glass-card span-full" id="landingPagesPanel">
+                            <div class="card-header">
+                                <h3>Landing Pages</h3>
+                                <div class="grid-controls" style="margin-left: auto;">
+                                    <button class="btn btn-secondary btn-sm" onclick="saveView('landingPages')">Save
+                                        View</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="loadView('landingPages')">Load
+                                        View</button>
+                                    <input type="text" class="table-search styled-select" placeholder="Search URLs..."
+                                        data-target="landingPagesTable">
+                                </div>
+                            </div>
+
+                            <!-- Summary cards -->
+                            <div style="padding: 1rem 1.25rem 0;">
+                                <div class="lp-metric-grid" id="landingPageSummary"></div>
+                            </div>
+
+                            <!-- Subtab toggle -->
+                            <div class="lp-subtab-bar">
+                                <button class="lp-subtab active" data-target="lp-tab-unexpanded">
+                                    📄 Landing Pages
+                                </button>
+                                <button class="lp-subtab" data-target="lp-tab-expanded">
+                                    🔗 Expanded Landing Pages
+                                </button>
+                            </div>
+
+                            <!-- Unexpanded URLs tab -->
+                            <div class="lp-tab-content table-responsive" id="lp-tab-unexpanded">
+                                <div id="grid-landingPages" class="ag-theme-alpine" style="height: 420px; width: 100%;">
+                                </div>
+                            </div>
+
+                            <!-- Expanded URLs tab (hidden by default) -->
+                            <div class="lp-tab-content table-responsive" id="lp-tab-expanded" style="display:none;">
+                                <p style="padding:0.5rem 1rem; color:var(--text-muted); font-size:0.83rem;">
+                                    Expanded final URLs include ValueTrack parameter substitution.
+                                    Data may be unavailable for campaigns without sufficient traffic.
+                                </p>
+                                <div id="grid-expandedLandingPages" class="ag-theme-alpine" style="height: 420px; width: 100%;">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <div class="tab-content" id="tab-proposals">
+                <div class="card glass-card span-full" style="margin-bottom: 2rem;">
+                    <div class="card-header">
+                        <h3>Opportunities & Suggestions</h3>
+                    </div>
+                    <div class="candidate-signal-grid" id="candidateSignalsGrid" style="padding: 1.5rem;">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <div class="card glass-card span-full"
+                    style="border-color: rgba(34, 197, 94, 0.4); background: rgba(34, 197, 94, 0.02); margin-bottom: 2rem;">
+                    <div class="card-header">
+                        <h3 style="color: var(--success); display: flex; align-items: center; gap: 0.5rem;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                            </svg>
+                            Recommended Actions
+                        </h3>
+                    </div>
+                    <div class="checklist-grid" id="checklistGrid" style="padding: 1.5rem;">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <div class="card glass-card span-full">
+                    <div class="card-header">
+                        <h3>Recommendations Requiring Review</h3>
+                    </div>
+                    <div class="proposals-grid" id="proposalsGrid" style="padding: 1.5rem;">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <div class="card glass-card span-full" style="margin-top: 2rem;">
+                    <div class="card-header">
+                        <h3>Past Decisions & Tracking</h3>
+                    </div>
+                    <div class="proposal-lifecycle-grid" id="proposalLifecycleGrid" style="padding: 1.5rem;">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Clicks Detail Modal -->
+    <div id="clicksModal" class="modal-overlay">
+        <div class="modal-content-card">
+            <div class="modal-header">
+                <h3>Clicks</h3>
+                <button class="modal-close-btn" onclick="closeClicksModal()" aria-label="Close modal">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="card glass-card span-full" style="box-shadow: none; border: none; background: transparent;">
+                    <div class="card-header"
+                        style="padding: 0 0 1rem 0; background: transparent; border-bottom: 1px solid var(--border-light);">
+                        <h3 style="font-size: 1.1rem; font-weight: 500; color: var(--text-primary);">Click Details</h3>
+                        <div class="grid-controls" style="margin-left: auto;">
+                            <button class="btn btn-secondary btn-sm" onclick="saveView('clickPaths')">Save View</button>
+                            <button class="btn btn-secondary btn-sm" onclick="loadView('clickPaths')">Load View</button>
+                            <input type="text" class="table-search styled-select" placeholder="Search clicks..."
+                                data-target="grid-clickPaths">
+                        </div>
+                    </div>
+                    <div class="table-responsive" style="margin-top: 1rem;">
+                        <div id="grid-clickPaths" class="ag-theme-alpine" style="height: 450px; width: 100%;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- UI Overlay for Messages -->
+    <div id="toast" class="toast">Action completed!</div>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>

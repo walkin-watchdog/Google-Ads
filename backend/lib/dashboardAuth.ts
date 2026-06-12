@@ -1,0 +1,731 @@
+import crypto from 'crypto';
+import type { NextFunction, Request, Response } from 'express';
+import type { Pool } from 'pg';
+
+const MAGIC_TOKEN_BYTES = 32;
+const SESSION_TOKEN_BYTES = 32;
+const DEFAULT_MAGIC_TTL_MINUTES = 10;
+const DEFAULT_SESSION_MINUTES = 60;
+const MAX_MAGIC_TTL_MINUTES = 60;
+const MAX_SESSION_MINUTES = 12 * 60;
+const AUTH_RECORD_RETENTION_DAYS = 7;
+const SESSION_COOKIE = 'dashboard_session';
+const MAGIC_TOKEN_COOKIE = 'dashboard_magic_token';
+
+type DashboardAuthOptions = {
+  pool: Pool;
+};
+
+type MagicLinkInput = {
+  ttl_minutes?: unknown;
+  session_minutes?: unknown;
+  reason?: unknown;
+  redirect_path?: unknown;
+  created_by?: unknown;
+};
+
+export type MagicLinkResult = {
+  url: string;
+  expires_at: string;
+};
+
+function sha256(value: string): string {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function randomToken(bytes: number): string {
+  return crypto.randomBytes(bytes).toString('base64url');
+}
+
+function numericMinutes(value: unknown, fallback: number, max: number, field: string): number {
+  if (value === undefined || value === null || value === '') return fallback;
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || !Number.isInteger(numberValue)) {
+    throw new Error(`${field} must be an integer number of minutes.`);
+  }
+  if (numberValue < 1 || numberValue > max) {
+    throw new Error(`${field} must be between 1 and ${max} minutes.`);
+  }
+  return numberValue;
+}
+
+function optionalText(value: unknown, maxLength: number, field: string): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (text.length > maxLength) throw new Error(`${field} must be ${maxLength} characters or fewer.`);
+  return text;
+}
+
+function normalizeRedirectPath(value: unknown): string {
+  if (value === undefined || value === null || value === '') return '/';
+  const text = String(value).trim();
+  if (!text.startsWith('/') || text.startsWith('//') || text.includes('\\') || /[\u0000-\u001F\u007F]/.test(text)) {
+    throw new Error('redirect_path must be a same-origin path starting with /.');
+  }
+  if (text.length > 300) throw new Error('redirect_path must be 300 characters or fewer.');
+  return text;
+}
+
+function normalizePublicBaseUrl(value: string): string {
+  const text = value.trim().replace(/\/+$/, '');
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error('PUBLIC_DASHBOARD_BASE_URL must be a valid absolute http(s) URL.');
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error('PUBLIC_DASHBOARD_BASE_URL must be an absolute http(s) URL without credentials, query, or fragment.');
+  }
+  return text;
+}
+
+function publicDashboardBaseUrl(req?: Request): string {
+  const configured = process.env.PUBLIC_DASHBOARD_BASE_URL;
+  if (configured) return normalizePublicBaseUrl(configured);
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('PUBLIC_DASHBOARD_BASE_URL is required to create dashboard magic links in production.');
+  }
+  if (!req) throw new Error('PUBLIC_DASHBOARD_BASE_URL is required to create dashboard magic links.');
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  if (!['http', 'https'].includes(proto)) throw new Error('Unable to infer dashboard base URL. Set PUBLIC_DASHBOARD_BASE_URL.');
+  if (!host) throw new Error('Unable to infer dashboard base URL. Set PUBLIC_DASHBOARD_BASE_URL.');
+  return normalizePublicBaseUrl(`${proto}://${host}`);
+}
+
+function readCookie(req: Request, name: string): string | null {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const [rawName, ...rawValue] = part.trim().split('=');
+    if (rawName === name) {
+      try {
+        return decodeURIComponent(rawValue.join('='));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function clearCookieOptions(req?: Request, path = '/'): { path: string; secure: boolean; sameSite: 'lax' } {
+  return {
+    path,
+    secure: dashboardCookieSecure(req),
+    sameSite: 'lax'
+  };
+}
+
+function bearerToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+  return authHeader.slice(7);
+}
+
+function tokenMatchesSecret(token: string | null): boolean {
+  const expected = process.env.SECRET_API_KEY;
+  if (!expected || !token) return false;
+  const expectedBuffer = Buffer.from(expected);
+  const tokenBuffer = Buffer.from(token);
+  return expectedBuffer.length === tokenBuffer.length && crypto.timingSafeEqual(expectedBuffer, tokenBuffer);
+}
+
+function requestIp(req?: Request): string | null {
+  if (!req) return null;
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.ip || null;
+}
+
+function userAgent(req?: Request): string | null {
+  if (!req) return null;
+  const value = String(req.headers['user-agent'] || '').trim();
+  return value ? value.slice(0, 500) : null;
+}
+
+export function isLocalDashboardOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  if (origin === 'null') return true;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) return false;
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost'
+    || host.endsWith('.localhost')
+    || host === '127.0.0.1'
+    || host === '::1';
+}
+
+function requestAllowsDashboardBearer(req: Request): boolean {
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+  return isLocalDashboardOrigin(origin);
+}
+
+export function setAuthNoStoreHeaders(res: Response): void {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+  );
+}
+
+export async function cleanupExpiredDashboardAuth(pool: Pool): Promise<void> {
+  await pool.query(
+    `DELETE FROM dashboard_sessions
+         WHERE expires_at < now() - ($1::int * INTERVAL '1 day')
+            OR revoked_at < now() - ($1::int * INTERVAL '1 day')`,
+    [AUTH_RECORD_RETENTION_DAYS]
+  );
+  await pool.query(
+    `DELETE FROM dashboard_magic_links
+         WHERE expires_at < now() - ($1::int * INTERVAL '1 day')
+            OR used_at < now() - ($1::int * INTERVAL '1 day')`,
+    [AUTH_RECORD_RETENTION_DAYS]
+  );
+}
+
+export async function ensureDashboardAuthSchema(pool: Pool): Promise<void> {
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+  await pool.query(`
+        CREATE TABLE IF NOT EXISTS dashboard_magic_links (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            token_hash TEXT NOT NULL UNIQUE,
+            reason TEXT,
+            redirect_path TEXT NOT NULL DEFAULT '/',
+            session_minutes INTEGER NOT NULL DEFAULT ${DEFAULT_SESSION_MINUTES},
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_by TEXT,
+            consumed_ip TEXT,
+            consumed_user_agent TEXT
+        )
+    `);
+  await pool.query(`ALTER TABLE dashboard_magic_links ADD COLUMN IF NOT EXISTS consumed_ip TEXT`);
+  await pool.query(`ALTER TABLE dashboard_magic_links ADD COLUMN IF NOT EXISTS consumed_user_agent TEXT`);
+  await pool.query(`
+        CREATE TABLE IF NOT EXISTS dashboard_sessions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            session_hash TEXT NOT NULL UNIQUE,
+            magic_link_id UUID REFERENCES dashboard_magic_links(id) ON DELETE SET NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            revoked_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_seen_at TIMESTAMPTZ,
+            ip_address TEXT,
+            user_agent TEXT
+        )
+    `);
+  await pool.query(`ALTER TABLE dashboard_sessions ADD COLUMN IF NOT EXISTS ip_address TEXT`);
+  await pool.query(`ALTER TABLE dashboard_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_dashboard_magic_links_expires_at ON dashboard_magic_links (expires_at)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions (expires_at)`);
+  await cleanupExpiredDashboardAuth(pool);
+}
+
+export async function createDashboardMagicLink(pool: Pool, input: MagicLinkInput = {}, req?: Request): Promise<MagicLinkResult> {
+  await cleanupExpiredDashboardAuth(pool).catch(() => undefined);
+  const ttlMinutes = numericMinutes(input.ttl_minutes, DEFAULT_MAGIC_TTL_MINUTES, MAX_MAGIC_TTL_MINUTES, 'ttl_minutes');
+  const sessionMinutes = numericMinutes(input.session_minutes, DEFAULT_SESSION_MINUTES, MAX_SESSION_MINUTES, 'session_minutes');
+  const reason = optionalText(input.reason, 500, 'reason');
+  const createdBy = optionalText(input.created_by, 120, 'created_by');
+  const redirectPath = normalizeRedirectPath(input.redirect_path);
+  const token = randomToken(MAGIC_TOKEN_BYTES);
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
+
+  await pool.query(
+    `INSERT INTO dashboard_magic_links
+         (token_hash, reason, redirect_path, session_minutes, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+    [sha256(token), reason, redirectPath, sessionMinutes, expiresAt.toISOString(), createdBy]
+  );
+
+  const url = `${publicDashboardBaseUrl(req)}/auth/magic?token=${encodeURIComponent(token)}`;
+  return { url, expires_at: expiresAt.toISOString() };
+}
+
+export function renderMagicLanding(token: string): string {
+  const escaped = token.replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char] || char));
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Open Dashboard | Zenseeo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #f4f7f6;
+      --bg-surface: #ffffff;
+      --border-light: #e2e8f0;
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #64748b;
+      --primary: #f25e36;
+      --primary-hover: #e04d27;
+      --primary-glow: rgba(242, 94, 54, 0.12);
+      --shadow: 0 20px 40px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.02);
+      --radius-lg: 16px;
+      --radius-md: 10px;
+      --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+      --font-heading: 'Outfit', system-ui, -apple-system, sans-serif;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-base: #0a0e17;
+        --bg-surface: #111827;
+        --border-light: #1f2937;
+        --text-primary: #f9fafb;
+        --text-secondary: #cbd5e1;
+        --text-muted: #64748b;
+        --primary: #ff6f47;
+        --primary-hover: #ff8361;
+        --primary-glow: rgba(255, 111, 71, 0.15);
+        --shadow: 0 20px 40px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.05);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background-color: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .blob {
+      position: absolute;
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      filter: blur(90px);
+      opacity: 0.12;
+      z-index: 0;
+      pointer-events: none;
+      animation: pulse 12s infinite alternate;
+    }
+
+    .blob-1 {
+      background: var(--primary);
+      top: 10%;
+      left: 15%;
+    }
+
+    .blob-2 {
+      background: #3b82f6;
+      bottom: 10%;
+      right: 15%;
+      animation-delay: -6s;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1) translate(0, 0); }
+      100% { transform: scale(1.2) translate(15px, -30px); }
+    }
+
+    main {
+      width: min(440px, calc(100vw - 32px));
+      background: var(--bg-surface);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-lg);
+      padding: 36px;
+      box-shadow: var(--shadow);
+      z-index: 1;
+      position: relative;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px) scale(0.98);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 24px;
+    }
+
+    .brand-logo-img {
+      height: 64px;
+      width: auto;
+      object-fit: contain;
+      transition: filter 0.3s ease;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .brand-logo-img {
+        filter: invert(0.9) brightness(1.2) hue-rotate(180deg);
+      }
+    }
+
+    h1 {
+      font-family: var(--font-heading);
+      font-size: 1.5rem;
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 10px;
+      letter-spacing: -0.02em;
+    }
+
+    p {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      line-height: 1.6;
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, var(--primary) 0%, #ff7c5c 100%);
+      color: white;
+      font-family: var(--font-heading);
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 14px 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 12px var(--primary-glow);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px var(--primary-glow);
+      filter: brightness(1.05);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    button svg {
+      transition: transform 0.2s ease;
+    }
+
+    button:hover svg {
+      transform: translateX(4px);
+    }
+
+    .divider {
+      height: 1px;
+      background-color: var(--border-light);
+      margin: 28px 0;
+    }
+
+    .security-features {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .feature-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      text-align: left;
+    }
+
+    .feature-item svg {
+      color: var(--primary);
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .feature-text {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .feature-text strong {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .feature-text span {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .footer {
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 24px;
+    }
+  </style>
+</head>
+<body>
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <main>
+    <div class="logo-container">
+      <img src="/logo.png" alt="Zenseeo Logo" class="brand-logo-img">
+    </div>
+
+    <h1>Verify Session</h1>
+    <p>You requested access to the Google Ads Dashboard. Continue to proceed securely.</p>
+
+    <form method="post" action="/auth/magic/consume" autocomplete="off">
+      <input id="magic-token" type="hidden" name="token" value="${escaped}">
+      <button type="submit">
+        <span>Continue to dashboard</span>
+      </button>
+    </form>
+
+    <div class="divider"></div>
+
+    <div class="security-features">
+      <div class="feature-item">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+        <div class="feature-text">
+          <strong>One-Time Access Link</strong>
+          <span>This secure token is single-use and will be invalidated instantly.</span>
+        </div>
+      </div>
+      <div class="feature-item">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        <div class="feature-text">
+          <strong>Auto-Expiration</strong>
+          <span>Unused links expire shortly. Session will timeout automatically.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Secured by Zenseeo
+    </div>
+  </main>
+  <script>
+    const form = document.querySelector('form');
+    if (form) {
+      form.addEventListener('submit', () => {
+        const button = form.querySelector('button[type="submit"]');
+        if (button) {
+          button.disabled = true;
+          button.textContent = "Opening dashboard...";
+        }
+      });
+    }
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", "/auth/magic");
+    }
+  </script>
+</body>
+</html>`;
+}
+
+export async function consumeDashboardMagicLink(pool: Pool, token: string, req?: Request): Promise<{ sessionToken: string, redirectPath: string, expiresAt: Date }> {
+  if (!token || token.length < 20 || token.length > 200) {
+    throw new Error('Invalid or expired dashboard link.');
+  }
+  await cleanupExpiredDashboardAuth(pool).catch(() => undefined);
+  const sessionToken = randomToken(SESSION_TOKEN_BYTES);
+  const sessionHash = sha256(sessionToken);
+  const ip = requestIp(req);
+  const ua = userAgent(req);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const linkResult = await client.query(
+      `SELECT id, redirect_path, session_minutes
+             FROM dashboard_magic_links
+             WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
+             FOR UPDATE`,
+      [sha256(token)]
+    );
+    if (linkResult.rows.length === 0) {
+      throw new Error('Invalid or expired dashboard link.');
+    }
+    const link = linkResult.rows[0];
+    await client.query(
+      `UPDATE dashboard_magic_links
+             SET used_at = now(), consumed_ip = $2, consumed_user_agent = $3
+             WHERE id = $1`,
+      [link.id, ip, ua]
+    );
+    const sessionMinutes = Number(link.session_minutes || DEFAULT_SESSION_MINUTES);
+    const expiresAt = new Date(Date.now() + sessionMinutes * 60_000);
+    await client.query(
+      `INSERT INTO dashboard_sessions (session_hash, magic_link_id, expires_at, ip_address, user_agent)
+             VALUES ($1, $2, $3, $4, $5)`,
+      [sessionHash, link.id, expiresAt.toISOString(), ip, ua]
+    );
+    await client.query('COMMIT');
+    return { sessionToken, redirectPath: link.redirect_path || '/', expiresAt };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function hasDashboardSession(pool: Pool, req: Request): Promise<boolean> {
+  const sessionToken = readCookie(req, SESSION_COOKIE);
+  if (!sessionToken) return false;
+  if (sessionToken.length < 20 || sessionToken.length > 200) return false;
+  const result = await pool.query(
+    `UPDATE dashboard_sessions
+         SET last_seen_at = now()
+         WHERE session_hash = $1 AND revoked_at IS NULL AND expires_at > now()
+         RETURNING id`,
+    [sha256(sessionToken)]
+  );
+  return result.rows.length > 0;
+}
+
+function dashboardCookieSecure(req?: Request): boolean {
+  const explicit = String(process.env.DASHBOARD_COOKIE_SECURE || '').trim().toLowerCase();
+  if (explicit === 'true') return true;
+  if (explicit === 'false') return false;
+  if (process.env.NODE_ENV === 'production') return true;
+  const configuredBase = process.env.PUBLIC_DASHBOARD_BASE_URL;
+  if (configuredBase && /^https:\/\//i.test(configuredBase.trim())) return true;
+  const forwardedProto = String(req?.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return forwardedProto === 'https' || Boolean(req?.secure);
+}
+
+export function setDashboardSessionCookie(res: Response, sessionToken: string, expiresAt: Date, req?: Request): void {
+  const secure = dashboardCookieSecure(req);
+  const maxAge = Math.max(expiresAt.getTime() - Date.now(), 0);
+  res.cookie(SESSION_COOKIE, sessionToken, {
+    httpOnly: true,
+    secure,
+    sameSite: 'lax',
+    expires: expiresAt,
+    maxAge,
+    path: '/'
+  });
+}
+
+export function clearDashboardSessionCookie(res: Response, req?: Request): void {
+  res.clearCookie(SESSION_COOKIE, clearCookieOptions(req));
+}
+
+export function setDashboardMagicTokenCookie(res: Response, token: string, req?: Request): void {
+  res.cookie(MAGIC_TOKEN_COOKIE, token, {
+    httpOnly: true,
+    secure: dashboardCookieSecure(req),
+    sameSite: 'lax',
+    maxAge: DEFAULT_MAGIC_TTL_MINUTES * 60_000,
+    path: '/auth/magic/consume'
+  });
+}
+
+export function clearDashboardMagicTokenCookie(res: Response, req?: Request): void {
+  res.clearCookie(MAGIC_TOKEN_COOKIE, clearCookieOptions(req, '/auth/magic/consume'));
+}
+
+export function readDashboardMagicTokenCookie(req: Request): string {
+  return readCookie(req, MAGIC_TOKEN_COOKIE) || '';
+}
+
+export async function revokeDashboardSession(pool: Pool, req: Request): Promise<void> {
+  const sessionToken = readCookie(req, SESSION_COOKIE);
+  if (!sessionToken) return;
+  await pool.query(
+    `UPDATE dashboard_sessions
+         SET revoked_at = COALESCE(revoked_at, now())
+         WHERE session_hash = $1 AND revoked_at IS NULL`,
+    [sha256(sessionToken)]
+  );
+}
+
+export function authenticateAdminBearer(req: Request, res: Response, next: NextFunction): void {
+  if (!tokenMatchesSecret(bearerToken(req))) {
+    res.status(403).json({ error: 'Forbidden: Invalid API Key' });
+    return;
+  }
+  next();
+}
+
+export function authenticateDashboardAccess({ pool }: DashboardAuthOptions) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    if (tokenMatchesSecret(bearerToken(req)) && requestAllowsDashboardBearer(req)) {
+      next();
+      return;
+    }
+    try {
+      if (await hasDashboardSession(pool, req)) {
+        next();
+        return;
+      }
+    } catch (err) {
+      console.error('Dashboard session auth failed:', err);
+      res.status(500).json({ error: 'Dashboard session auth failed' });
+      return;
+    }
+    res.status(401).json({ error: 'Dashboard session required' });
+  };
+}
+
+export function requireDashboardPageSession({ pool }: DashboardAuthOptions) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      if (await hasDashboardSession(pool, req)) {
+        next();
+        return;
+      }
+    } catch (err) {
+      console.error('Dashboard page auth failed:', err);
+      res.status(500).send('Dashboard auth failed.');
+      return;
+    }
+    res.status(401).send('You do not have the permission to access this.');
+  };
+}
