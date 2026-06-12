@@ -1,0 +1,61 @@
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    restart: unless-stopped
+    shm_size: 128mb
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-google_ads}
+      POSTGRES_USER: ${POSTGRES_USER:-google_ads}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-20}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-google_ads} -d ${POSTGRES_DB:-google_ads}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - ${VPS_ENV_FILE:-.env.vps}
+    environment:
+      DEPLOYMENT_MODE: vps
+      NODE_ENV: production
+      PORT: ${PORT:-7860}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-google_ads}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-google_ads}
+      DATABASE_SSL: disable
+      STARTUP_REFRESH: ${STARTUP_REFRESH:-false}
+      DASHBOARD_DB_POOL_MAX: ${DASHBOARD_DB_POOL_MAX:-1}
+      DASHBOARD_DB_IDLE_TIMEOUT_MS: ${DASHBOARD_DB_IDLE_TIMEOUT_MS:-5000}
+      GOOGLE_ADS_REFRESH_FETCH_CONCURRENCY: ${GOOGLE_ADS_REFRESH_FETCH_CONCURRENCY:-1}
+    ports:
+      - "${HOST_BIND:-0.0.0.0}:${HOST_PORT:-7860}:${PORT:-7860}"
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e \"fetch('http://127.0.0.1:${PORT:-7860}/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  postgres_data:

@@ -1,0 +1,44 @@
+name: Deploy Backend to VPS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: VPS
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ vars.VPS_USER || 'ubuntu' }}
+      VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+      VPS_PATH: ${{ vars.VPS_PATH || '/opt/google-ads-backend' }}
+      VPS_ENV_FILE: .env.vps
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rsync
+        run: sudo apt-get update && sudo apt-get install -y rsync
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          test -n "$VPS_HOST"
+          test -n "$VPS_SSH_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+          ssh-keyscan -p "$VPS_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Write VPS environment
+        env:
+          VPS_ENV_FILE_CONTENT: ${{ secrets.VPS_ENV_FILE }}
+        run: |
+          if [ -n "$VPS_ENV_FILE_CONTENT" ]; then
+            printf '%s\n' "$VPS_ENV_FILE_CONTENT" > .env.vps
+          fi
+
+      - name: Deploy
+        run: VPS_SSH_KEY_PATH="$HOME/.ssh/vps_key" bash scripts/deploy-vps.sh
