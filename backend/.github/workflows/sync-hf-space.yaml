@@ -1,0 +1,30 @@
+name: Sync Backend to Hugging Face Space
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    if: vars.DEPLOY_TARGET == 'hf'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Hugging Face Hub CLI
+        run: pip install huggingface_hub
+
+      - name: Upload to Hugging Face Hub
+        env:
+          HF_SPACE: ${{ vars.HF_SPACE }}
+          HF_OIDC_RESOURCE: spaces/${{ vars.HF_SPACE }}
+        run: |
+          test -n "$HF_SPACE"
+          hf upload "$HF_SPACE" . . --repo-type=space
