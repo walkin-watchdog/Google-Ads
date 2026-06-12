@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+!.env.hf.example
+!.env.vps.example
+.git/
+.github/
+.DS_Store
+client/config.js
+*.log

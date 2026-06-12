@@ -1,0 +1,53 @@
+{
+  "name": "google-ads",
+  "version": "1.0.0",
+  "description": "Google Ads Dashboard Backend",
+  "main": "server.ts",
+  "type": "commonjs",
+  "scripts": {
+    "start": "bun run scripts/start.ts",
+    "build:client-assets": "bun run scripts/build_client_assets.ts",
+    "start:direct": "bun run build:client-assets && bun run server.ts",
+    "dev": "bun run build:client-assets && bun --watch server.ts",
+    "refresh": "bun run scripts/refresh_google_ads_data.ts",
+    "backfill": "bun run scripts/refresh_google_ads_data.ts --backfill --backfill-start-date \"$GOOGLE_ADS_WAREHOUSE_START_DATE\"",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "convert-auction-csv": "bun run scripts/convert_csv_to_json.ts",
+    "db:reset": "bun run scripts/reset_db.ts",
+    "db:migrate": "bun run scripts/migrate.ts",
+    "mcp:generate-key": "bun run scripts/generate_mcp_api_key.ts"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/outfit": "^5.2.8",
+    "ag-grid-community": "^36.0.1",
+    "chart.js": "^4.5.1",
+    "chartjs-chart-sankey": "^0.15.0",
+    "compression": "^1.8.1",
+    "cors": "^2.8.6",
+    "daterangepicker": "^3.1.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "idb": "^8.0.3",
+    "jquery": "^4.0.0",
+    "js-yaml": "^5.2.1",
+    "moment": "^2.30.1",
+    "nodemailer": "^9.0.3",
+    "pg": "^8.22.0",
+    "stemmer": "^2.0.1",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.13.3",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pg": "^8.20.0",
+    "@types/web-push": "^3.6.4",
+    "fake-indexeddb": "^6.2.5"
+  }
+}
