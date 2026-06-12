@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Ads Optimization Proposal",
+  "type": "object",
+  "required": [
+    "proposal_id",
+    "created_at",
+    "status",
+    "type",
+    "priority",
+    "account_id",
+    "date_range",
+    "summary",
+    "suggested_action",
+    "evidence",
+    "reasoning_summary",
+    "risk_level",
+    "human_review"
+  ],
+  "properties": {
+    "proposal_id": {
+      "type": "string",
+      "pattern": "^ads-prop-\\d{4}-\\d{2}-\\d{2}-\\d{3,}$",
+      "description": "Unique ID in format ads-prop-YYYY-MM-DD-NNN"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending_review",
+        "accepted",
+        "rejected",
+        "watchlist",
+        "needs_more_data"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "PAUSE_KEYWORD_CANDIDATE",
+        "ADD_NEGATIVE_KEYWORD_CANDIDATE",
+        "SCALE_KEYWORD_CANDIDATE",
+        "PROMOTE_SEARCH_TERM_TO_KEYWORD",
+        "MATCH_TYPE_RESTRUCTURE",
+        "LANDING_PAGE_ISSUE",
+        "TRACKING_ISSUE",
+        "COMPETITOR_CAMPAIGN_REVIEW",
+        "AD_COPY_TEST_IDEA",
+        "BID_STRATEGY_REVIEW",
+        "DAYPARTING_REVIEW",
+        "LOCATION_REVIEW",
+        "BUDGET_SCALE_CANDIDATE"
+      ]
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low"]
+    },
+    "account_id": {
+      "type": "string"
+    },
+    "date_range": {
+      "type": "object",
+      "properties": {
+        "start_date": { "type": "string", "format": "date" },
+        "end_date": { "type": "string", "format": "date" }
+      },
+      "required": ["start_date", "end_date"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Human-readable one-line summary of the proposal."
+    },
+    "suggested_action": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "match_type": { "type": "string" },
+        "text": { "type": "string" },
+        "target_entity": { "type": "string" },
+        "details": { "type": "string" }
+      },
+      "required": ["action"]
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "spend": { "type": "number" },
+        "clicks": { "type": "integer" },
+        "impressions": { "type": "integer" },
+        "conversions": { "type": "number" },
+        "cpa": { "type": "number" },
+        "ctr": { "type": "number" },
+        "cvr": { "type": "number" },
+        "campaigns_seen": { "type": "integer" },
+        "additional_notes": { "type": "string" }
+      }
+    },
+    "reasoning_summary": {
+      "type": "string",
+      "description": "Evidence-based reasoning for the recommendation."
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "human_review": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "type": ["string", "null"],
+          "enum": [null, "accepted", "rejected", "watchlist", "needs_more_data"]
+        },
+        "reviewed_by": { "type": ["string", "null"] },
+        "reviewed_at": { "type": ["string", "null"], "format": "date-time" },
+        "note": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

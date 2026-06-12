@@ -1,0 +1,313 @@
+# Named GAQL Report Templates for the Google Ads Dashboard Skill
+# Each template maps to a single MCP `search_search` call.
+# The agent reads this file to know which reports to pull during a refresh.
+
+reports:
+  account_summary:
+    purpose: Executive KPIs for the selected date range.
+    resource: customer
+    fields:
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.all_conversions
+      - metrics.conversions_value
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  daily_trend:
+    purpose: Spend, clicks, conversions, CPA, CPC, CTR and CVR by day.
+    resource: ad_group
+    fields:
+      - segments.date
+      - campaign.name
+      - ad_group.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.all_conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+    orderings:
+      - "segments.date ASC"
+
+
+  campaign_performance:
+    purpose: Campaign-level budget allocation, CPA, CVR, CTR and spend efficiency.
+    resource: campaign
+    fields:
+      - segments.date
+      - campaign.name
+      - campaign.id
+      - campaign.status
+      - campaign.bidding_strategy_type
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.all_conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+      - metrics.conversions_value
+      - metrics.search_impression_share
+      - metrics.search_budget_lost_impression_share
+      - metrics.search_rank_lost_impression_share
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  ad_group_performance:
+    purpose: Find strong, weak or fragmented ad groups.
+    resource: ad_group
+    fields:
+      - segments.date
+      - ad_group.name
+      - ad_group.id
+      - ad_group.status
+      - campaign.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.all_conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  keyword_performance:
+    purpose: Identify keyword winners, losers, high-CPC terms and zero-conversion spend.
+    resource: keyword_view
+    fields:
+      - segments.date
+      - ad_group_criterion.keyword.text
+      - ad_group_criterion.keyword.match_type
+      - ad_group_criterion.status
+      - ad_group.name
+      - campaign.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.all_conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+      - metrics.search_impression_share
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  search_term_performance:
+    purpose: Find negative keyword candidates and new exact-match opportunities.
+    resource: search_term_view
+    fields:
+      - segments.date
+      - search_term_view.search_term
+      - search_term_view.status
+      - campaign.name
+      - ad_group.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.all_conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  device_performance:
+    purpose: Segment core metrics by device type (Desktop, Mobile, Tablet).
+    resource: ad_group
+    fields:
+      - segments.date
+      - segments.device
+      - campaign.name
+      - ad_group.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.conversions_value
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  day_of_week_performance:
+    purpose: Identify which days perform best overall.
+    resource: ad_group
+    fields:
+      - segments.date
+      - segments.day_of_week
+      - campaign.name
+      - ad_group.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.conversions_value
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  landing_page_performance:
+    purpose: Compare final URLs and detect tracking or conversion issues.
+    resource: landing_page_view
+    fields:
+      - segments.date
+      - landing_page_view.unexpanded_final_url
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  day_and_hour_performance:
+    purpose: Heatmap data showing performance by hour and day.
+    resource: ad_group
+    fields:
+      - segments.date
+      - segments.day_of_week
+      - segments.hour
+      - campaign.name
+      - ad_group.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  conversion_action_performance:
+    purpose: Show which conversion actions fired, their categories, status, counting type, and attribution model.
+    resource: conversion_action
+    fields:
+      - segments.date
+      - conversion_action.id
+      - conversion_action.name
+      - conversion_action.type
+      - conversion_action.category
+      - conversion_action.status
+      - conversion_action.include_in_conversions_metric
+      - conversion_action.primary_for_goal
+      - conversion_action.counting_type
+      - conversion_action.attribution_model_settings.attribution_model
+      - metrics.all_conversions
+      - metrics.all_conversions_value
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+      - "metrics.all_conversions > 0"
+    orderings:
+      - "segments.date DESC"
+      - "metrics.all_conversions DESC"
+
+  conversion_attribution_by_search_term:
+    purpose: Attribute each conversion action to search term, keyword, match type, and date.
+    resource: search_term_view
+    fields:
+      - segments.date
+      - search_term_view.search_term
+      - search_term_view.status
+      - campaign.name
+      - ad_group.name
+      - segments.keyword.info.text
+      - segments.keyword.info.match_type
+      - segments.conversion_action_name
+      - segments.conversion_action_category
+      - metrics.conversions
+      - metrics.all_conversions
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+      - "metrics.conversions > 0"
+    orderings:
+      - "segments.date DESC"
+      - "metrics.conversions DESC"
+    caveat: "Do not select clicks or cost with conversion_action segments; Google Ads rejects that combination."
+
+  click_evidence_by_day:
+    purpose: Expose GCLID/click metadata for one specific day, used to verify whether multiple conversions came from the same click ID.
+    resource: click_view
+    fields:
+      - segments.date
+      - click_view.gclid
+      - campaign.name
+      - ad_group.name
+      - click_view.keyword_info.text
+      - click_view.keyword_info.match_type
+      - segments.device
+      - segments.click_type
+      - segments.slot
+      - metrics.clicks
+    conditions:
+      - "segments.date = '<YYYY-MM-DD>'"
+    caveat: "ClickView requires a single-day date filter. It does not include website session events; persist GCLID/GBRAID/WBRAID in your app for exact session proof."
+
+  quality_score:
+    purpose: Diagnose rank by keyword Quality Score, ad relevance, landing-page experience, and predicted CTR.
+    resource: ad_group_criterion
+    fields:
+      - ad_group_criterion.keyword.text
+      - ad_group_criterion.keyword.match_type
+      - ad_group_criterion.status
+      - ad_group_criterion.quality_info.quality_score
+      - ad_group_criterion.quality_info.creative_quality_score
+      - ad_group_criterion.quality_info.post_click_quality_score
+      - ad_group_criterion.quality_info.search_predicted_ctr
+    conditions:
+      - "ad_group_criterion.type = KEYWORD"
+      - "ad_group_criterion.status != REMOVED"
+    orderings:
+      - "ad_group_criterion.keyword.text ASC"
+
+  auction_insights_domains:
+    purpose: Show rival domains taking impression share, overlap, position-above rate, and outranking share.
+    resource: campaign
+    fields:
+      - campaign.name
+      - segments.auction_insight_domain
+      - metrics.auction_insight_search_impression_share
+      - metrics.auction_insight_search_overlap_rate
+      - metrics.auction_insight_search_position_above_rate
+      - metrics.auction_insight_search_outranking_share
+      - metrics.auction_insight_search_top_impression_percentage
+      - metrics.auction_insight_search_absolute_top_impression_percentage
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+    orderings:
+      - "metrics.auction_insight_search_impression_share DESC"
+    caveat: "Some developer tokens/accounts cannot access auction insight metrics through API. If rejected, use Google Ads UI export and save it as data/latest/auction-insights.json."
+
+  conversion_action_metrics_by_ad_group:
+    purpose: Campaign-level conversion action metrics for joining with account-level configs.
+    resource: ad_group
+    fields:
+      - campaign.name
+      - ad_group.name
+      - segments.conversion_action_name
+      - segments.conversion_action_category
+      - metrics.conversions
+      - metrics.conversions_value
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+      - "metrics.conversions > 0"
