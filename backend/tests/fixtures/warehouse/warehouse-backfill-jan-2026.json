@@ -1,0 +1,60 @@
+{
+  "customerId": "1234567890",
+  "dateWindow": {
+    "startDate": "2026-01-01",
+    "endDate": "2026-01-30"
+  },
+  "campaigns": [
+    {
+      "id": "C1",
+      "name": "Search Core",
+      "status": "ENABLED",
+      "costMicrosPerDay": 1000000,
+      "clicksPerDay": 10,
+      "impressionsPerDay": 100,
+      "conversionsPerDay": 1,
+      "conversionValuePerDay": 500
+    },
+    {
+      "id": "C2",
+      "name": "Search Expansion",
+      "status": "ENABLED",
+      "costMicrosPerDay": 500000,
+      "clicksPerDay": 5,
+      "impressionsPerDay": 80,
+      "conversionsPerDay": 0,
+      "conversionValuePerDay": 0
+    }
+  ],
+  "adGroups": [
+    {
+      "id": "A1",
+      "campaignId": "C1",
+      "name": "CRM",
+      "status": "ENABLED"
+    },
+    {
+      "id": "A2",
+      "campaignId": "C2",
+      "name": "WhatsApp",
+      "status": "ENABLED"
+    }
+  ],
+  "configuredKeywords": [
+    {
+      "id": "K1",
+      "campaignId": "C1",
+      "adGroupId": "A1",
+      "text": "whatsapp crm",
+      "matchType": "EXACT",
+      "status": "ENABLED"
+    }
+  ],
+  "searchTerms": [
+    {
+      "campaignId": "C1",
+      "adGroupId": "A1",
+      "term": "whatsapp crm"
+    }
+  ]
+}
