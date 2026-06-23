@@ -416,6 +416,7 @@
             <div class="tab-content" id="tab-keywords">
                 <div class="keyword-subtabs" role="tablist" aria-label="Keywords and discovery sections">
                     <button class="keyword-subtab active" data-keyword-subtab="active">Keywords</button>
+                    <button class="keyword-subtab" data-keyword-subtab="negatives">Negative Keywords</button>
                     <button class="keyword-subtab" data-keyword-subtab="search-terms">Search Terms</button>
                     <button class="keyword-subtab" data-keyword-subtab="discovery">Discovery</button>
                     <button class="keyword-subtab" data-keyword-subtab="insights">Insights</button>
@@ -444,7 +445,22 @@
                         </div>
                     </div>
 
-                    <div class="card glass-card span-full">
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
+                        <div class="card-header">
+                            <h3>Keywords</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('allKeywords')">Save View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('allKeywords')">Load View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search keywords..."
+                                    data-target="allKeywordsTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-allKeywords" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
+                        </div>
+                    </div>
+
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
                         <div class="card-header">
                             <h3>Keyword Performance</h3>
                             <div class="grid-controls" style="margin-left: auto;">
@@ -458,6 +474,23 @@
                         </div>
                         <div class="table-responsive">
                             <div id="grid-keywords" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="keyword-subpanel" id="keyword-subtab-negatives">
+                    <div class="card glass-card span-full">
+                        <div class="card-header">
+                            <h3>Negative Keywords</h3>
+                            <div class="grid-controls" style="margin-left: auto;">
+                                <button class="btn btn-secondary btn-sm" onclick="saveView('negatives')">Save View</button>
+                                <button class="btn btn-secondary btn-sm" onclick="loadView('negatives')">Load View</button>
+                                <input type="text" class="table-search styled-select" placeholder="Search negatives..."
+                                    data-target="negativesTable">
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <div id="grid-negatives" class="ag-theme-alpine" style="height: 600px; width: 100%;"></div>
                         </div>
                     </div>
                 </div>
@@ -651,7 +684,7 @@
                 <div class="keyword-subpanel" id="keyword-subtab-insights">
                     <div class="keyword-metric-grid" id="keywordUniverseSummary"></div>
 
-                    <div class="card glass-card span-full">
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
                         <div class="card-header">
                             <h3>Keyword Universe Coverage</h3>
                         </div>
@@ -660,7 +693,7 @@
                         </div>
                     </div>
 
-                    <div class="card glass-card span-full">
+                    <div class="card glass-card span-full" style="margin-top: 1.5rem;">
                         <div class="card-header">
                             <h3>Combined Keyword Universe</h3>
                             <div class="grid-controls" style="margin-left: auto;">

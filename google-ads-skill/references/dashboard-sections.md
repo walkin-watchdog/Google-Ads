@@ -12,8 +12,9 @@
 
 - Campaigns: includes IDs, status, spend, CPA/ROAS, targets, impression share, lost IS.
 - Ad groups: campaign/ad group performance.
-- Keywords: includes campaign/ad group/criterion IDs for verification.
-- Keywords: also includes Keyword Planner enrichment when available: `avgMonthlySearches`, `competition`, `competitionIndex`, `lowBid`, `highBid`, `plannerScore`, and `plannerSource`.
+- Keywords (Configured): includes campaign/ad group/criterion IDs, status (including REMOVED), Eligibility (system serving status & reasons), final URL, and standard performance metrics over the selected date range.
+- Keyword Performance: includes campaign/ad group/criterion IDs for verification, and includes Keyword Planner enrichment when available: `avgMonthlySearches`, `competition`, `competitionIndex`, `lowBid`, `highBid`, `plannerScore`, and `plannerSource`.
+- Negative Keywords: shows campaign and ad-group level negative keywords, where they are added, and match types.
 - Search terms: includes campaign/ad group IDs, current search-term status, and the same Keyword Planner enrichment when available.
 - Keyword Planner: `keywordPlanner.status`, `keywordPlanner.ideas`, and `keywordPlanner.historicalMetrics` from official Google Ads Keyword Planner endpoints. Ideas include `source = "idea"` and may include `seedType` (`keyword`, `keyword_and_url`, `url`, or `site`), `seedKeywords`, `seedUrl`, and `seedSite`. Historical metric rows use `source = "historical"`. Status seed metadata can include keywords, URL/page seed, site seed, language, geo targets, and network. Use Planner for keyword mining and bid/competition context, not as account performance proof.
 - Attribution: conversion actions, conversion attribution, click evidence caveats, offline conversion CSV export, and `leadAttribution` when first-party website capture is active.

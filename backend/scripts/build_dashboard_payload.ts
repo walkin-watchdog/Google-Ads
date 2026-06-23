@@ -182,6 +182,9 @@ const adGroups = readJSON(path.join(LATEST, 'ad-group-performance.json'));
 const keywords = readJSON(path.join(LATEST, 'keyword-performance.json'));
 const searchTerms = readJSON(path.join(LATEST, 'search-term-performance.json'));
 const dailyTrend = readJSON(path.join(LATEST, 'daily-trend.json'));
+const configuredKeywordsRaw = readJSON(path.join(LATEST, 'configured-keywords.json')) || [];
+const campaignNegativesRaw = readJSON(path.join(LATEST, 'campaign-negatives.json')) || [];
+const adGroupNegativesRaw = readJSON(path.join(LATEST, 'ad-group-negatives.json')) || [];
 const conversionActionsRaw = readJSON(path.join(LATEST, 'conversion-action-performance.json')) || [];
 const conversionMetricsRaw = readJSON(path.join(LATEST, 'conversion-action-metrics-by-ad-group.json')) || [];
 const conversionAttributionRaw = readJSON(path.join(LATEST, 'conversion-attribution-by-search-term.json')) || [];
@@ -435,6 +438,97 @@ const keywordData = (Array.isArray(keywords) ? keywords : [keywords]).map(k => {
     label,
   };
 });
+
+// Aggregate performance metrics from keywordData by campaign, ad group, keyword text, and match type
+const keywordPerfMap = new Map<string, { spend: number; clicks: number; impressions: number; conversions: number }>();
+for (const kw of keywordData) {
+  const key = `${kw.campaignId}|${kw.adGroupId}|${normKey(kw.keyword)}|${kw.matchType}`;
+  const existing = keywordPerfMap.get(key) || { spend: 0, clicks: 0, impressions: 0, conversions: 0 };
+  existing.spend += kw.spend || 0;
+  existing.clicks += kw.clicks || 0;
+  existing.impressions += kw.impressions || 0;
+  existing.conversions += kw.conversions || 0;
+  keywordPerfMap.set(key, existing);
+}
+
+// Normalize configured keywords (additive Keywords table, queries ad_group_criterion directly)
+const configuredKeywordData = (Array.isArray(configuredKeywordsRaw) ? configuredKeywordsRaw : [configuredKeywordsRaw]).filter(Boolean).map(k => {
+  const text = k['ad_group_criterion.keyword.text'] || '';
+  const matchType = k['ad_group_criterion.keyword.match_type'] || '';
+  const campaignId = k['campaign.id'] || null;
+  const adGroupId = k['ad_group.id'] || null;
+
+  const key = `${campaignId}|${adGroupId}|${normKey(text)}|${matchType}`;
+  const perf = keywordPerfMap.get(key) || { spend: 0, clicks: 0, impressions: 0, conversions: 0 };
+
+  const spend = +perf.spend.toFixed(2);
+  const clicks = perf.clicks;
+  const impressions = perf.impressions;
+  const conversions = perf.conversions;
+  
+  const ctr = impressions > 0 ? pct(clicks / impressions) : 0;
+  const avgCpc = clicks > 0 ? +(spend / clicks).toFixed(2) : 0;
+  const cvr = clicks > 0 ? pct(conversions / clicks) : 0;
+  const cpa = conversions > 0 ? +(spend / conversions).toFixed(2) : 0;
+
+  const primaryStatus = k['ad_group_criterion.primary_status'] || '';
+  const primaryStatusReasons = k['ad_group_criterion.primary_status_reasons'] || [];
+
+  const finalUrls = k['ad_group_criterion.final_urls'] || [];
+  const finalUrl = Array.isArray(finalUrls) && finalUrls.length > 0 ? finalUrls[0] : (typeof finalUrls === 'string' ? finalUrls : '');
+
+  return {
+    campaignId,
+    adGroupId,
+    criterionId: k['ad_group_criterion.criterion_id'] || null,
+    resourceName: k['ad_group_criterion.resource_name'] || null,
+    keyword: text,
+    matchType,
+    status: k['ad_group_criterion.status'] || '',
+    campaign: k['campaign.name'] || '',
+    adGroup: k['ad_group.name'] || '',
+    spend,
+    clicks,
+    impressions,
+    ctr,
+    avgCpc,
+    conversions,
+    cvr,
+    cpa,
+    finalUrl,
+    primaryStatus,
+    primaryStatusReasons
+  };
+});
+
+// Normalize negative keywords (additive Negatives table, queries campaign_criterion & ad_group_criterion)
+const campaignNegatives = (Array.isArray(campaignNegativesRaw) ? campaignNegativesRaw : [campaignNegativesRaw]).filter(Boolean).map(n => {
+  return {
+    campaignId: n['campaign.id'] || null,
+    campaign: n['campaign.name'] || null,
+    adGroupId: null,
+    adGroup: null,
+    keyword: n['campaign_criterion.keyword.text'] || '',
+    matchType: n['campaign_criterion.keyword.match_type'] || '',
+    addedTo: n['campaign.name'] || '',
+    level: 'Campaign'
+  };
+});
+
+const adGroupNegatives = (Array.isArray(adGroupNegativesRaw) ? adGroupNegativesRaw : [adGroupNegativesRaw]).filter(Boolean).map(n => {
+  return {
+    campaignId: n['campaign.id'] || null,
+    campaign: n['campaign.name'] || null,
+    adGroupId: n['ad_group.id'] || null,
+    adGroup: n['ad_group.name'] || null,
+    keyword: n['ad_group_criterion.keyword.text'] || '',
+    matchType: n['ad_group_criterion.keyword.match_type'] || '',
+    addedTo: n['ad_group.name'] || '',
+    level: 'Ad Group'
+  };
+});
+
+const negativesData = [...campaignNegatives, ...adGroupNegatives];
 
 // ────────────────────────────────────────────────────────────────────────────
 // Normalize search terms
@@ -819,6 +913,8 @@ const payload = {
   campaigns: campaignData,
   adGroups: adGroupData,
   keywords: keywordData,
+  configuredKeywords: configuredKeywordData,
+  negatives: negativesData,
   searchTerms: searchTermData,
   keywordPlanner,
   conversionActions,

@@ -429,6 +429,7 @@ async function init() {
 
 // Navigation
 function keywordSubtabFromHash(hash) {
+    if (hash === 'keyword-negatives') return 'negatives';
     if (hash === 'search-terms') return 'search-terms';
     if (hash === 'keyword-planner') return 'discovery';
     if (hash === 'keyword-insights') return 'insights';
@@ -436,6 +437,7 @@ function keywordSubtabFromHash(hash) {
 }
 
 function keywordSubtabHash(subtab) {
+    if (subtab === 'negatives') return 'keyword-negatives';
     if (subtab === 'search-terms') return 'search-terms';
     if (subtab === 'discovery') return 'keyword-planner';
     if (subtab === 'insights') return 'keyword-insights';
@@ -443,7 +445,7 @@ function keywordSubtabHash(subtab) {
 }
 
 function activateKeywordSubtab(subtab, updateHash = true) {
-    const next = ['active', 'search-terms', 'discovery', 'insights'].includes(subtab) ? subtab : 'active';
+    const next = ['active', 'negatives', 'search-terms', 'discovery', 'insights'].includes(subtab) ? subtab : 'active';
     document.querySelectorAll('.keyword-subtab').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.keywordSubtab === next);
     });
@@ -1543,6 +1545,8 @@ function applyLocalFilter(startDate, endDate) {
     const rankShareEntities = selAdGroup !== 'All' ? adGroups : campaigns;
     const rankShareDaily = agg(selAdGroup !== 'All' ? filterData(window.fullData.adGroups) : campaignRows, 'date').sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const keywords = agg(filterData(window.fullData.keywords), 'keyword');
+    const configuredKeywords = filterData(window.fullData.configuredKeywords);
+    const negatives = filterData(window.fullData.negatives);
     const searchTerms = agg(filterData(window.fullData.searchTerms), 'searchTerm');
     const devicePerformance = agg(filterData(window.fullData.devicePerformance), 'device');
     const dayOfWeekPerformance = agg(filterData(window.fullData.dayOfWeekPerformance), 'day');
@@ -1649,6 +1653,8 @@ function applyLocalFilter(startDate, endDate) {
         dailyCampaigns,
         adGroups,
         keywords,
+        configuredKeywords,
+        negatives,
         searchTerms,
         devicePerformance,
         dayOfWeekPerformance,
@@ -2714,7 +2720,100 @@ function renderTables() {
         { field: 'lostISRank', headerName: 'Lost IS (Rank)', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' }
     ]);
 
-    // Keywords
+    // Keywords (Configured)
+    if (dashboardData.configuredKeywords) {
+        initGrid('grid-allKeywords', dashboardData.configuredKeywords, [
+            { field: 'keyword', headerName: 'Keyword', pinned: 'left', minWidth: 150 },
+            { field: 'status', headerName: 'Status', valueFormatter: p => p.value === 'ENABLED' ? '🟢 Enabled' : p.value === 'PAUSED' ? '⏸️ Paused' : p.value === 'REMOVED' ? '❌ Removed' : p.value },
+            {
+                field: 'primaryStatus',
+                headerName: 'Eligibility',
+                minWidth: 200,
+                wrapText: true,
+                autoHeight: true,
+                cellRenderer: p => {
+                    const status = p.data.primaryStatus || '';
+                    const reasons = p.data.primaryStatusReasons || [];
+
+                    const formatStatus = str => {
+                        if (!str) return '-';
+                        return str.replace(/_/g, ' ')
+                            .toLowerCase()
+                            .split(' ')
+                            .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+                            .join(' ');
+                    };
+
+                    const formatReason = str => {
+                        if (!str) return '';
+                        // Remove common criterion resource prefixes
+                        let clean = str.replace(/^(AD_GROUP_CRITERION_|CRITERION_)/, '');
+                        return clean.replace(/_/g, ' ')
+                            .toLowerCase()
+                            .split(' ')
+                            .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+                            .join(' ');
+                    };
+
+                    if (reasons.includes('AD_GROUP_CRITERION_LOW_QUALITY')) {
+                        return `<div style="line-height: 1.3; padding: 4px 0; color: #ef4444; font-weight: 500;">
+                            Eligible (Limited)<br>
+                            <span style="color: #ef4444; font-size: 0.85em; font-weight: normal; text-decoration: underline dotted;">Rarely shown (low Quality Score)</span>
+                        </div>`;
+                    }
+                    if (reasons.includes('AD_GROUP_CRITERION_LOW_SEARCH_VOLUME')) {
+                        return `<div style="line-height: 1.3; padding: 4px 0; color: #f59e0b; font-weight: 500;">
+                            Eligible (Limited)<br>
+                            <span style="color: #64748b; font-size: 0.85em; font-weight: normal;">Rarely shown (low search volume)</span>
+                        </div>`;
+                    }
+
+                    const displayStatus = formatStatus(status);
+
+                    if (status === 'ELIGIBLE') {
+                        return `<span style="color: #10b981; font-weight: 500;">${displayStatus}</span>`;
+                    }
+                    if (status === 'PAUSED' || status === 'CAMPAIGN_PAUSED' || status === 'AD_GROUP_PAUSED') {
+                        return `<span style="color: #64748b;">${displayStatus}</span>`;
+                    }
+                    if (status === 'REMOVED' || status === 'NOT_ELIGIBLE') {
+                        const color = '#ef4444';
+                        if (reasons.length > 0) {
+                            const formattedReasons = reasons.map(formatReason).join(', ');
+                            return `<div style="line-height: 1.3; padding: 4px 0; color: ${color};">
+                                <span style="font-weight: 500;">${displayStatus}</span><br>
+                                <span style="color: #64748b; font-size: 0.85em; font-weight: normal;">${formattedReasons}</span>
+                            </div>`;
+                        }
+                        return `<span style="color: ${color}; font-weight: 500;">${displayStatus}</span>`;
+                    }
+
+                    if (reasons.length > 0) {
+                        const formattedReasons = reasons.map(formatReason).join(', ');
+                        return `<div style="line-height: 1.3; padding: 4px 0;">
+                            <span style="font-weight: 500;">${displayStatus}</span><br>
+                            <span style="color: #64748b; font-size: 0.85em;">${formattedReasons}</span>
+                        </div>`;
+                    }
+
+                    return displayStatus;
+                }
+            },
+            { field: 'campaign', headerName: 'Campaign' },
+            { field: 'adGroup', headerName: 'Ad Group' },
+            { field: 'finalUrl', headerName: 'Final URL', cellRenderer: p => p.value ? `<a href="${p.value}" target="_blank" class="table-link">${p.value}</a>` : '-' },
+            { field: 'impressions', headerName: 'Impressions', filter: 'agNumberColumnFilter' },
+            { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
+            { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'spend', headerName: 'Cost', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'avgCpc', headerName: 'Cost per Click', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'conversions', headerName: 'Conversions', filter: 'agNumberColumnFilter' },
+            { field: 'cvr', headerName: 'Conversion Rate', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'cpa', headerName: 'Cost per Conversion', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' }
+        ]);
+    }
+
+    // Keywords (Performance)
     initGrid('grid-keywords', dashboardData.keywords, [
         { field: 'keyword', headerName: 'Keyword', pinned: 'left', minWidth: 150 },
         { field: 'status', headerName: 'Status', valueFormatter: p => p.value === 'ENABLED' ? '🟢' : p.value === 'PAUSED' ? '⏸️' : '❌' },
@@ -2737,6 +2836,16 @@ function renderTables() {
         { field: 'plannerScore', headerName: 'Planner Score', filter: 'agNumberColumnFilter', sort: 'desc' },
         { field: 'label', headerName: 'Suggestion' }
     ]);
+
+    // Negative Keywords
+    if (dashboardData.negatives) {
+        initGrid('grid-negatives', dashboardData.negatives, [
+            { field: 'keyword', headerName: 'Negative keyword', pinned: 'left', minWidth: 150 },
+            { field: 'addedTo', headerName: 'Added to' },
+            { field: 'level', headerName: 'Level' },
+            { field: 'matchType', headerName: 'Match type' }
+        ]);
+    }
 
     // Search Terms
     initGrid('grid-searchTerms', dashboardData.searchTerms, [

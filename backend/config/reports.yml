@@ -355,3 +355,54 @@ reports:
     conditions:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
       - "metrics.conversions > 0"
+
+  configured_keywords:
+    purpose: Fetch all configured positive keywords (enabled, paused, and removed) regardless of traffic.
+    resource: ad_group_criterion
+    fields:
+      - campaign.id
+      - campaign.name
+      - ad_group.id
+      - ad_group.name
+      - ad_group_criterion.criterion_id
+      - ad_group_criterion.resource_name
+      - ad_group_criterion.keyword.text
+      - ad_group_criterion.keyword.match_type
+      - ad_group_criterion.status
+      - ad_group_criterion.final_urls
+      - ad_group_criterion.primary_status
+      - ad_group_criterion.primary_status_reasons
+    conditions:
+      - "ad_group_criterion.type = KEYWORD"
+      - "ad_group_criterion.negative = FALSE"
+
+  campaign_negatives:
+    purpose: Fetch campaign-level negative keywords.
+    resource: campaign_criterion
+    fields:
+      - campaign.id
+      - campaign.name
+      - campaign_criterion.criterion_id
+      - campaign_criterion.keyword.text
+      - campaign_criterion.keyword.match_type
+      - campaign_criterion.negative
+    conditions:
+      - "campaign_criterion.type = KEYWORD"
+      - "campaign_criterion.negative = TRUE"
+
+  ad_group_negatives:
+    purpose: Fetch ad group-level negative keywords.
+    resource: ad_group_criterion
+    fields:
+      - campaign.id
+      - campaign.name
+      - ad_group.id
+      - ad_group.name
+      - ad_group_criterion.criterion_id
+      - ad_group_criterion.keyword.text
+      - ad_group_criterion.keyword.match_type
+      - ad_group_criterion.negative
+      - ad_group_criterion.status
+    conditions:
+      - "ad_group_criterion.type = KEYWORD"
+      - "ad_group_criterion.negative = TRUE"
