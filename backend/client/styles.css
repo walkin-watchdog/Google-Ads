@@ -689,6 +689,62 @@ html.dark .kpi-card:hover {
     margin-bottom: 0;
 }
 
+.lp-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 0.85rem;
+    margin-bottom: 1.25rem;
+}
+
+@media (max-width: 1200px) {
+    .lp-metric-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 768px) {
+    .lp-metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+.lp-subtab-bar {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border-light);
+    margin-bottom: 1.25rem;
+}
+
+.lp-subtab {
+    height: 32px;
+    padding: 0 0.85rem;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.lp-subtab:hover {
+    color: var(--text-primary);
+    border-color: var(--border-highlight);
+    background: var(--bg-surface-hover);
+}
+
+.lp-subtab.active {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: var(--primary-glow);
+}
+
+
 .keyword-metric,
 .planner-metric {
     display: grid;

@@ -497,11 +497,14 @@
 
                 <div class="keyword-subpanel" id="keyword-subtab-search-terms">
                     <div class="keyword-metric-grid" id="searchTermSummary"></div>
+                    <p style="margin: 0.25rem 0 0.75rem; color: var(--text-muted); font-size: 0.83rem;">
+                        Read-only Google Ads search term performance. Low-volume queries may be hidden by Google.
+                    </p>
                     <div class="keyword-action-grid" id="searchTermActionGroups"></div>
 
                     <div class="card glass-card span-full">
                         <div class="card-header">
-                            <h3>Search Term Mining</h3>
+                            <h3>Search Terms</h3>
                             <div class="grid-controls" style="margin-left: auto;">
                                 <button class="btn btn-secondary btn-sm" onclick="saveView('searchTerms')">Save
                                     View</button>
@@ -517,6 +520,7 @@
                         </div>
                     </div>
                 </div>
+
 
                 <div class="keyword-subpanel" id="keyword-subtab-discovery">
                     <div class="dashboard-grid">
@@ -1116,9 +1120,9 @@
                 <!-- Sub-tab 4: Landing Pages -->
                 <div class="rank-subpanel" id="rank-subtab-landing">
                     <div class="dashboard-grid">
-                        <div class="card glass-card span-full">
+                        <div class="card glass-card span-full" id="landingPagesPanel">
                             <div class="card-header">
-                                <h3>Landing Page Performance</h3>
+                                <h3>Landing Pages</h3>
                                 <div class="grid-controls" style="margin-left: auto;">
                                     <button class="btn btn-secondary btn-sm" onclick="saveView('landingPages')">Save
                                         View</button>
@@ -1128,13 +1132,41 @@
                                         data-target="landingPagesTable">
                                 </div>
                             </div>
-                            <div class="table-responsive">
-                                <div id="grid-landingPages" class="ag-theme-alpine" style="height: 400px; width: 100%;">
+
+                            <!-- Summary cards -->
+                            <div style="padding: 1rem 1.25rem 0;">
+                                <div class="lp-metric-grid" id="landingPageSummary"></div>
+                            </div>
+
+                            <!-- Subtab toggle -->
+                            <div class="lp-subtab-bar">
+                                <button class="lp-subtab active" data-target="lp-tab-unexpanded">
+                                    📄 Landing Pages
+                                </button>
+                                <button class="lp-subtab" data-target="lp-tab-expanded">
+                                    🔗 Expanded Landing Pages
+                                </button>
+                            </div>
+
+                            <!-- Unexpanded URLs tab -->
+                            <div class="lp-tab-content table-responsive" id="lp-tab-unexpanded">
+                                <div id="grid-landingPages" class="ag-theme-alpine" style="height: 420px; width: 100%;">
+                                </div>
+                            </div>
+
+                            <!-- Expanded URLs tab (hidden by default) -->
+                            <div class="lp-tab-content table-responsive" id="lp-tab-expanded" style="display:none;">
+                                <p style="padding:0.5rem 1rem; color:var(--text-muted); font-size:0.83rem;">
+                                    Expanded final URLs include ValueTrack parameter substitution.
+                                    Data may be unavailable for campaigns without sufficient traffic.
+                                </p>
+                                <div id="grid-expandedLandingPages" class="ag-theme-alpine" style="height: 420px; width: 100%;">
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
+
             </div>
 
             <div class="tab-content" id="tab-proposals">

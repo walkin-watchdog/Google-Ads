@@ -36,6 +36,11 @@ Use candidate signals, keyword rows, and `leadAttribution` when available. Only 
 
 Use search-term rows, `QUERY_MISMATCH` signals, and first-party UTM-term quality. Debate exact negative vs phrase/root negative. Avoid broad negatives when the root may appear in qualified traffic or when `leadAttribution` shows qualified/converted leads for that term.
 
+> **Privacy caveat**: Always note that Google may hide low-volume search terms per its privacy policy. The absence of a term in the dashboard does not prove that no queries occurred for that term. Do not overstate parity with Google Ads UI, which may show rows the API omits.
+
+> **Read-only scope**: The dashboard has no keyword creation, negative keyword mutation, or any other account mutation controls. All search term and landing page sections are read-only reporting only.
+
+
 ## Which terms should I scale?
 
 Use search-term/keyword conversion performance, Keyword Planner AMS/competition/bid context when available, target CPA where available, impression-share constraints, and first-party qualified/converted lead quality. Debate promote-only vs promote-and-isolate.
@@ -64,3 +69,13 @@ Use competitor search-term spend, conversion count, CPA, first-party lead qualit
 ## Reset/Clear the dashboard
 
 When the user asks to clear or reset all diagnostic and proposal cards from the dashboard, call `clear_proposals` and `clear_diagnoses` to empty the corresponding database tables.
+
+## Search Terms and Landing Pages analysis
+
+- Use `searchTerms` payload for matched keyword, match types, and match source. Always note that Google may hide low-volume rows.
+- `matchedKeyword` and `searchTermMatchSource` enrich the context but may be null for some campaign types (Performance Max, Smart campaigns).
+- For landing pages, use the "Landing pages" subtab for `landing_page_view.unexpanded_final_url` and the "Expanded landing pages" subtab for `expanded_landing_page_view.expanded_final_url`.
+- `mobileFriendlyClicksPct`, `validAmpClicksPct`, and `speedScore` may be `null` or `n/a` when Google does not return diagnostic data for the campaign type; never treat null as "0%" or "poor".
+- `plannerScore` is calculated locally from search volume, competition, bid range, intent words, and account performance. Google Ads API does not return this score. Always label it as a local ranking helper when surfacing it to analysts.
+- The dashboard does not have "Add as keyword", "Add as negative", or any other account mutation buttons. All reporting is read-only.
+

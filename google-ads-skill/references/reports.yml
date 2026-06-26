@@ -129,12 +129,16 @@ reports:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
 
   search_term_performance:
-    purpose: Find negative keyword candidates and new exact-match opportunities.
+    purpose: Read-only search term performance including matched keyword, match types, and match source. Google may hide low-volume queries per its privacy policy.
     resource: search_term_view
     fields:
       - segments.date
       - search_term_view.search_term
       - search_term_view.status
+      - segments.keyword.info.text
+      - segments.keyword.info.match_type
+      - segments.search_term_match_type
+      - segments.search_term_match_source
       - campaign.id
       - campaign.name
       - ad_group.id
@@ -149,6 +153,7 @@ reports:
       - metrics.cost_per_conversion
     conditions:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+    caveat: "Google Ads may omit low-volume search terms per its privacy policy. Absence of a term does not prove no queries occurred."
 
   device_performance:
     purpose: Segment core metrics by device type (Desktop, Mobile, Tablet).
@@ -189,7 +194,7 @@ reports:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
 
   landing_page_performance:
-    purpose: Compare final URLs and detect tracking or conversion issues.
+    purpose: Compare unexpanded final URLs for conversion issues, mobile-friendliness, AMP validity, and speed scores.
     resource: landing_page_view
     fields:
       - segments.date
@@ -205,8 +210,36 @@ reports:
       - metrics.ctr
       - metrics.average_cpc
       - metrics.cost_per_conversion
+      - metrics.mobile_friendly_clicks_percentage
+      - metrics.valid_accelerated_mobile_pages_clicks_percentage
+      - metrics.speed_score
     conditions:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+    caveat: "mobile_friendly_clicks_percentage, valid_accelerated_mobile_pages_clicks_percentage, and speed_score may be null for campaigns without sufficient data."
+
+  expanded_landing_page_performance:
+    purpose: Expanded final URL performance including mobile-friendliness, AMP validity, and speed scores. Provides Google-style expanded landing pages drill-down.
+    resource: expanded_landing_page_view
+    fields:
+      - segments.date
+      - expanded_landing_page_view.expanded_final_url
+      - campaign.id
+      - campaign.name
+      - ad_group.id
+      - ad_group.name
+      - metrics.cost_micros
+      - metrics.clicks
+      - metrics.impressions
+      - metrics.conversions
+      - metrics.ctr
+      - metrics.average_cpc
+      - metrics.cost_per_conversion
+      - metrics.mobile_friendly_clicks_percentage
+      - metrics.valid_accelerated_mobile_pages_clicks_percentage
+      - metrics.speed_score
+    conditions:
+      - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+    caveat: "Expanded final URLs include ValueTrack parameter substitution. mobile_friendly_clicks_percentage and speed_score may be null for campaigns without sufficient data."
 
   day_and_hour_performance:
     purpose: Heatmap data showing performance by hour and day.

@@ -1497,11 +1497,12 @@ function applyLocalFilter(startDate, endDate) {
             else if (type === 'keyword') key = item.campaign + '|' + item.adGroup + '|' + item.keyword + '|' + item.matchType;
             else if (type === 'searchTerm') key = item.campaign + '|' + item.adGroup + '|' + item.searchTerm;
             else if (type === 'landingPage') key = item.finalUrl;
+            else if (type === 'expandedLandingPage') key = item.expandedFinalUrl;
             else if (type === 'date') key = item.date;
             else key = item.name || item.device || item.day || item.id;
 
             if (!agged.has(key)) {
-                agged.set(key, { ...item, spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionsValue: 0, _rawIS: 0, _rawLostBudget: 0, _rawLostRank: 0, _rawQS: 0 });
+                agged.set(key, { ...item, spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionsValue: 0, _rawIS: 0, _rawLostBudget: 0, _rawLostRank: 0, _rawQS: 0, _rawMobileFriendlyW: 0, _rawMobileFriendlyV: 0, _rawValidAmpW: 0, _rawValidAmpV: 0, _rawSpeedW: 0, _rawSpeedV: 0 });
             }
             const curr = agged.get(key);
             curr.spend += item.spend || 0;
@@ -1515,6 +1516,11 @@ function applyLocalFilter(startDate, endDate) {
             if (item.lostISBudget !== undefined && item.lostISBudget !== null) curr._rawLostBudget += (item.lostISBudget * (item.impressions || 0));
             if (item.lostISRank !== undefined && item.lostISRank !== null) curr._rawLostRank += (item.lostISRank * (item.impressions || 0));
             if (item.qualityScore !== undefined && item.qualityScore !== null) curr._rawQS += (item.qualityScore * (item.impressions || 0));
+            // Click-weighted accumulators for landing page percentage metrics
+            const w = item.clicks || 0;
+            if (item.mobileFriendlyClicksPct !== null && item.mobileFriendlyClicksPct !== undefined) { curr._rawMobileFriendlyW += w; curr._rawMobileFriendlyV += item.mobileFriendlyClicksPct * w; }
+            if (item.validAmpClicksPct !== null && item.validAmpClicksPct !== undefined) { curr._rawValidAmpW += w; curr._rawValidAmpV += item.validAmpClicksPct * w; }
+            if (item.speedScore !== null && item.speedScore !== undefined) { curr._rawSpeedW += w; curr._rawSpeedV += item.speedScore * w; }
         });
 
         return Array.from(agged.values()).map(item => {
@@ -1527,11 +1533,21 @@ function applyLocalFilter(startDate, endDate) {
             if (item._rawLostBudget > 0) item.lostISBudget = item.impressions ? item._rawLostBudget / item.impressions : 0;
             if (item._rawLostRank > 0) item.lostISRank = item.impressions ? item._rawLostRank / item.impressions : 0;
             if (item._rawQS > 0) item.qualityScore = item.impressions ? item._rawQS / item.impressions : 0;
+            // Weighted pct metrics: emit null if no clicks had this data
+            item.mobileFriendlyClicksPct = item._rawMobileFriendlyW > 0 ? +(item._rawMobileFriendlyV / item._rawMobileFriendlyW).toFixed(2) : null;
+            item.validAmpClicksPct = item._rawValidAmpW > 0 ? +(item._rawValidAmpV / item._rawValidAmpW).toFixed(2) : null;
+            item.speedScore = item._rawSpeedW > 0 ? +(item._rawSpeedV / item._rawSpeedW).toFixed(2) : null;
 
             delete item._rawIS;
             delete item._rawLostBudget;
             delete item._rawLostRank;
             delete item._rawQS;
+            delete item._rawMobileFriendlyW;
+            delete item._rawMobileFriendlyV;
+            delete item._rawValidAmpW;
+            delete item._rawValidAmpV;
+            delete item._rawSpeedW;
+            delete item._rawSpeedV;
 
             return item;
         });
@@ -1551,6 +1567,8 @@ function applyLocalFilter(startDate, endDate) {
     const devicePerformance = agg(filterData(window.fullData.devicePerformance), 'device');
     const dayOfWeekPerformance = agg(filterData(window.fullData.dayOfWeekPerformance), 'day');
     const landingPages = agg(filterData(window.fullData.landingPages), 'landingPage');
+    const expandedLandingPages = agg(filterData(window.fullData.expandedLandingPages || []), 'expandedLandingPage');
+
 
     const dhFiltered = filterData(window.fullData.dayAndHourPerformance);
     const dhAgg = new Map();
@@ -1660,6 +1678,8 @@ function applyLocalFilter(startDate, endDate) {
         dayOfWeekPerformance,
         dayAndHourPerformance: dhAggregated,
         landingPages,
+        expandedLandingPages,
+
         rankShareEntities,
         dailyRankShare: rankShareDaily,
         conversionActions: agg(filterData(window.fullData.conversionActions), 'name'),
@@ -2490,9 +2510,9 @@ function renderSearchTermContext() {
     const el = document.getElementById('searchTermActionGroups');
     if (el) {
         el.innerHTML = [
-            renderActionGroup('Add as Keywords', addRows, 'No strong add candidates in this filter.', 'success'),
-            renderActionGroup('Negative Candidates', negativeRows, 'No strong negative candidates in this filter.', 'danger'),
-            renderActionGroup('Monitoring', monitorRows, 'No remaining terms to monitor.', 'neutral')
+            renderActionGroup('Review candidates — Add as Keywords', addRows, 'No strong add candidates in this filter.', 'success'),
+            renderActionGroup('Review candidates — Negative Candidates', negativeRows, 'No strong negative candidates in this filter.', 'danger'),
+            renderActionGroup('Review candidates — Monitoring', monitorRows, 'No remaining terms to monitor.', 'neutral')
         ].join('');
     }
 }
@@ -2849,7 +2869,29 @@ function renderTables() {
 
     // Search Terms
     initGrid('grid-searchTerms', dashboardData.searchTerms, [
-        { field: 'searchTerm', headerName: 'Search Term', pinned: 'left', minWidth: 150 },
+        { field: 'searchTerm', headerName: 'Search Term', pinned: 'left', minWidth: 180, wrapText: true, autoHeight: true },
+        {
+            field: 'matchedKeyword',
+            headerName: 'Matched Keyword',
+            minWidth: 160,
+            valueFormatter: p => p.value || 'n/a'
+        },
+        {
+            field: 'keywordMatchType',
+            headerName: 'Keyword Match',
+            valueFormatter: p => p.value ? String(p.value).replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'n/a'
+        },
+        {
+            field: 'searchTermMatchType',
+            headerName: 'Search Term Match',
+            valueFormatter: p => p.value ? String(p.value).replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'n/a'
+        },
+        {
+            field: 'searchTermMatchSource',
+            headerName: 'Match Source',
+            headerTooltip: 'How Google matched this search term to your campaign. Examples: ADVERTISER_KEYWORD (your keyword triggered it), DSA (Dynamic Search Ads), SMART_CAMPAIGN, PERFORMANCE_MAX, AI_MAX, VERTICAL_FEED. This is a read-only Google Ads field.',
+            valueFormatter: p => p.value ? String(p.value).replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'n/a'
+        },
         { field: 'status', headerName: 'Status' },
         { field: 'campaign', headerName: 'Campaign' },
         { field: 'adGroup', headerName: 'Ad Group' },
@@ -2859,13 +2901,19 @@ function renderTables() {
         { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
         { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
         { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
-        { field: 'cpa', headerName: 'CPA', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
         { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'cpa', headerName: 'CPA', valueFormatter: params => params.data.conversions > 0 ? fmtCurr(params.value) : 'n/a', filter: 'agNumberColumnFilter' },
         { field: 'avgMonthlySearches', headerName: 'AMS', valueFormatter: nullableNumberFormatter, filter: 'agNumberColumnFilter' },
         { field: 'competition', headerName: 'Competition', valueFormatter: plannerStatusFormatter },
         { field: 'lowBid', headerName: 'Low Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
         { field: 'highBid', headerName: 'High Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'plannerScore', headerName: 'Planner Score', filter: 'agNumberColumnFilter', sort: 'desc' },
+        {
+            field: 'plannerScore',
+            headerName: 'Planner Score',
+            headerTooltip: 'Calculated locally from search volume, competition, bid range, intent words, and account performance. Google Ads API does not return this score.',
+            filter: 'agNumberColumnFilter',
+            sort: 'desc'
+        },
         { field: 'label', headerName: 'Suggestion' }
     ]);
 }
@@ -2921,7 +2969,12 @@ function renderKeywordPlannerExplorer() {
         { field: 'highBid', headerName: 'High Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
         { field: 'inAccountKeyword', headerName: 'In Keywords' },
         { field: 'inAccountSearchTerm', headerName: 'In Search Terms' },
-        { field: 'source', headerName: 'Source', valueFormatter: plannerSourceFormatter },
+        {
+            field: 'source',
+            headerName: 'Source',
+            headerTooltip: 'Source means which Keyword Planner endpoint produced the row, not a Google Ads account action. "Keyword idea" = generate_ideas endpoint; "Historical metrics" = get_historical_metrics endpoint.',
+            valueFormatter: plannerSourceFormatter
+        },
         { field: 'seedType', headerName: 'Seed Type', valueFormatter: plannerStatusFormatter },
         { field: 'fetchedAt', headerName: 'Fetched At' }
     ]);
@@ -4003,14 +4056,120 @@ function renderRankDiagnostics() {
         { field: 'expectedCtr', headerName: 'Expected CTR' }
     ]);
 
-    initGrid('grid-landingPages', landingPages, [
-        { field: 'finalUrl', headerName: 'Final URL', pinned: 'left', minWidth: 200, cellRenderer: p => p.value ? `<span class="table-link-wrap">${esc(p.value)}</span>` : '-' },
+    // ── Landing Pages section ────────────────────────────────────────────────
+    const expandedLandingPages = dashboardData.expandedLandingPages || [];
+
+    // Summary cards for landing pages
+    const lpSummaryEl = document.getElementById('landingPageSummary');
+    if (lpSummaryEl) {
+        const totalUrls = landingPages.length;
+        const totalClicks = landingPages.reduce((s, r) => s + (r.clicks || 0), 0);
+        const totalConv = landingPages.reduce((s, r) => s + (r.conversions || 0), 0);
+        const avgCvr = totalClicks > 0 ? (totalConv / totalClicks) * 100 : 0;
+
+        // Click-weighted averages for pct metrics (null if no data)
+        let mfW = 0, mfV = 0, ampW = 0, ampV = 0, spW = 0, spV = 0;
+        landingPages.forEach(r => {
+            const w = r.clicks || 0;
+            if (r.mobileFriendlyClicksPct !== null && r.mobileFriendlyClicksPct !== undefined) { mfW += w; mfV += r.mobileFriendlyClicksPct * w; }
+            if (r.validAmpClicksPct !== null && r.validAmpClicksPct !== undefined) { ampW += w; ampV += r.validAmpClicksPct * w; }
+            if (r.speedScore !== null && r.speedScore !== undefined) { spW += w; spV += r.speedScore * w; }
+        });
+        const avgMf = mfW > 0 ? (mfV / mfW).toFixed(1) : null;
+        const avgAmp = ampW > 0 ? (ampV / ampW).toFixed(1) : null;
+        const avgSpeed = spW > 0 ? (spV / spW).toFixed(1) : null;
+
+        const cards = [
+            { label: 'Total URLs', value: fmtNum(totalUrls), detail: 'Unexpanded final URLs' },
+            { label: 'Clicks', value: fmtNum(totalClicks), detail: '' },
+            { label: 'Conversions', value: fmtNum(totalConv), detail: '' },
+            { label: 'Avg CVR', value: fmtPct(avgCvr), detail: '' },
+            { label: 'Mobile-friendly %', value: avgMf !== null ? `${avgMf}%` : 'n/a', detail: 'Click-weighted avg' },
+            { label: 'Valid AMP %', value: avgAmp !== null ? `${avgAmp}%` : 'n/a', detail: 'Click-weighted avg' },
+            { label: 'Avg Speed Score', value: avgSpeed !== null ? avgSpeed : 'n/a', detail: 'Click-weighted avg' }
+        ];
+        lpSummaryEl.innerHTML = cards.map(c => `
+            <div class="keyword-metric">
+                <span>${esc(c.label)}</span>
+                <strong>${esc(String(c.value))}</strong>
+                ${c.detail ? `<small>${esc(c.detail)}</small>` : ''}
+            </div>
+        `).join('');
+    }
+
+    // Subtab toggle state (persisted on the element itself)
+    const lpPanel = document.getElementById('landingPagesPanel');
+    if (lpPanel && !lpPanel._lpTabsInitialised) {
+        lpPanel._lpTabsInitialised = true;
+        const tabBar = lpPanel.querySelector('.lp-subtab-bar');
+        if (tabBar) {
+            tabBar.querySelectorAll('.lp-subtab').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    tabBar.querySelectorAll('.lp-subtab').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    const target = btn.dataset.target;
+                    lpPanel.querySelectorAll('.lp-tab-content').forEach(el => {
+                        el.style.display = el.id === target ? '' : 'none';
+                    });
+                });
+            });
+        }
+    }
+
+    // URL cell renderer — safe external link + diagnostic helpers
+    const urlCellRenderer = (field, urlLabel) => p => {
+        if (!p.value) return '<span style="color:var(--text-muted);">—</span>';
+        const url = esc(p.value);
+        const rawUrl = p.value;
+        let diagnostics = '';
+        try {
+            const encoded = encodeURIComponent(rawUrl);
+            diagnostics = `
+                <span style="margin-left:0.4rem; white-space:nowrap;">
+                    <a href="https://pagespeed.web.dev/report?url=${encoded}" target="_blank" rel="noopener noreferrer"
+                       title="PageSpeed Insights" style="color:var(--text-muted); font-size:0.75rem; text-decoration:none;">PSI↗</a>
+                </span>`;
+        } catch (_) { }
+        return `<span class="table-link-wrap"><a href="${url}" target="_blank" rel="noopener noreferrer" style="color:var(--info); word-break:break-all;">${url}</a>${diagnostics}</span>`;
+    };
+
+    const lpCols = [
+        { field: 'finalUrl', headerName: 'Final URL', pinned: 'left', minWidth: 220, wrapText: true, autoHeight: true, cellRenderer: urlCellRenderer('finalUrl', 'Final URL') },
+        { field: 'campaign', headerName: 'Campaign' },
+        { field: 'adGroup', headerName: 'Ad Group' },
         { field: 'spend', headerName: 'Spend', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'impressions', headerName: 'Impr.', filter: 'agNumberColumnFilter' },
         { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
+        { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
         { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
         { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'cpa', headerName: 'CPA', valueFormatter: params => params.data.conversions > 0 ? fmtCurr(params.value) : 'n/a', filter: 'agNumberColumnFilter' }
-    ]);
+        { field: 'cpa', headerName: 'CPA', valueFormatter: params => params.data.conversions > 0 ? fmtCurr(params.value) : 'n/a', filter: 'agNumberColumnFilter' },
+        { field: 'mobileFriendlyClicksPct', headerName: 'Mobile-friendly %', valueFormatter: p => p.value !== null && p.value !== undefined ? `${fmtNum(p.value)}%` : 'n/a', filter: 'agNumberColumnFilter' },
+        { field: 'validAmpClicksPct', headerName: 'Valid AMP %', valueFormatter: p => p.value !== null && p.value !== undefined ? `${fmtNum(p.value)}%` : 'n/a', filter: 'agNumberColumnFilter' },
+        { field: 'speedScore', headerName: 'Speed Score', valueFormatter: p => p.value !== null && p.value !== undefined ? fmtNum(p.value) : 'n/a', filter: 'agNumberColumnFilter' }
+    ];
+
+    const expLpCols = [
+        { field: 'expandedFinalUrl', headerName: 'Expanded Final URL', pinned: 'left', minWidth: 240, wrapText: true, autoHeight: true, cellRenderer: urlCellRenderer('expandedFinalUrl', 'Expanded URL') },
+        { field: 'campaign', headerName: 'Campaign' },
+        { field: 'adGroup', headerName: 'Ad Group' },
+        { field: 'spend', headerName: 'Spend', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'impressions', headerName: 'Impr.', filter: 'agNumberColumnFilter' },
+        { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
+        { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
+        { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+        { field: 'cpa', headerName: 'CPA', valueFormatter: params => params.data.conversions > 0 ? fmtCurr(params.value) : 'n/a', filter: 'agNumberColumnFilter' },
+        { field: 'mobileFriendlyClicksPct', headerName: 'Mobile-friendly %', valueFormatter: p => p.value !== null && p.value !== undefined ? `${fmtNum(p.value)}%` : 'n/a', filter: 'agNumberColumnFilter' },
+        { field: 'validAmpClicksPct', headerName: 'Valid AMP %', valueFormatter: p => p.value !== null && p.value !== undefined ? `${fmtNum(p.value)}%` : 'n/a', filter: 'agNumberColumnFilter' },
+        { field: 'speedScore', headerName: 'Speed Score', valueFormatter: p => p.value !== null && p.value !== undefined ? fmtNum(p.value) : 'n/a', filter: 'agNumberColumnFilter' }
+    ];
+
+    initGrid('grid-landingPages', landingPages, lpCols);
+    initGrid('grid-expandedLandingPages', expandedLandingPages, expLpCols);
+
 
     if (auctionInsights) {
         initGrid('grid-auctionInsights', auctionInsights, [

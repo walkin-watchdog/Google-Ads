@@ -64,6 +64,49 @@ function sum(rows: any[], key: string): number {
   return rows.reduce((acc, row) => acc + (+row[key] || 0), 0);
 }
 
+// ── Typed normalization helpers ────────────────────────────────────────────────
+
+/** Returns a number or null — never coerces a missing API field to 0. */
+function nullableNumber(v: any): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Converts a Google Ads fractional metric (0–1) to a percentage, or null if missing. */
+function nullablePctMetric(obj: any, key: string): number | null {
+  if (!Object.prototype.hasOwnProperty.call(obj, key) || obj[key] === null || obj[key] === undefined) return null;
+  const n = Number(obj[key]);
+  return Number.isFinite(n) ? +(n * 100).toFixed(2) : null;
+}
+
+/**
+ * Click-weighted average of a metric across rows.
+ * Returns null when total clicks is zero (avoids 0% display for missing data).
+ */
+function weightedAverage(rows: any[], valueKey: string, weightKey: string): number | null {
+  let totalWeight = 0;
+  let totalValue = 0;
+  for (const row of rows) {
+    const w = Number(row[weightKey] || 0);
+    const v = row[valueKey];
+    if (v === null || v === undefined || !Number.isFinite(Number(v))) continue;
+    totalWeight += w;
+    totalValue += Number(v) * w;
+  }
+  return totalWeight > 0 ? +(totalValue / totalWeight).toFixed(2) : null;
+}
+
+/** Returns the first argument that is a non-empty string/number, or null. */
+function firstNonEmpty(...vals: any[]): string | null {
+  for (const v of vals) {
+    const s = v === null || v === undefined ? '' : String(v).trim();
+    if (s) return s;
+  }
+  return null;
+}
+
+
 function plannerNumber(value: any): number | null {
   if (value === undefined || value === null || value === '') return null;
   const n = Number(value);
@@ -191,6 +234,8 @@ const conversionAttributionRaw = readJSON(path.join(LATEST, 'conversion-attribut
 const clickPathsRaw = readJSON(path.join(LATEST, 'click-evidence-by-day.json')) || [];
 const qualityScoreRaw = readJSON(path.join(LATEST, 'quality-score.json')) || [];
 const landingPagesRaw = readJSON(path.join(LATEST, 'landing-page-performance.json')) || [];
+const expandedLandingPagesRaw = readJSON(path.join(LATEST, 'expanded-landing-page-performance.json')) || [];
+
 const auctionInsightsRaw = readJSON(path.join(LATEST, 'auction-insights-domains.json')) || [];
 const auctionInsightsStatusRaw = readJSON(path.join(LATEST, 'auction-insights-status.json')) || [];
 const deviceRaw = readJSON(path.join(LATEST, 'device-performance.json')) || [];
@@ -558,12 +603,17 @@ const searchTermData = (Array.isArray(searchTerms) ? searchTerms : [searchTerms]
       status: s['search_term_view.status'],
       campaign: s['campaign.name'],
       adGroup: s['ad_group.name'],
+      matchedKeyword: firstNonEmpty(s['segments.keyword.info.text']),
+      keywordMatchType: s['segments.keyword.info.match_type'] || null,
+      searchTermMatchType: s['segments.search_term_match_type'] || null,
+      searchTermMatchSource: s['segments.search_term_match_source'] || null,
       spend,
       clicks,
       impressions: Number(s['metrics.impressions']),
       ctr: pct(s['metrics.ctr']),
       avgCpc: micros(s['metrics.average_cpc']),
       conversions: conv,
+      cvr: clicks > 0 ? pct(conv / clicks) : 0,
       cpa: conv > 0 ? micros(s['metrics.cost_per_conversion']) : 0,
       ...plannerFields(term, plannerMetricFor(term), { spend, clicks, conversions: conv, cpa: conv > 0 ? micros(s['metrics.cost_per_conversion']) : 0 }, fallbackCpaBenchmark),
       label,
@@ -571,6 +621,7 @@ const searchTermData = (Array.isArray(searchTerms) ? searchTerms : [searchTerms]
       hasLowIntent,
     };
   });
+
 
 const existingKeywordSet = new Set(keywordData.map(row => normKey(row.keyword)));
 const existingSearchTermSet = new Set(searchTermData.map(row => normKey(row.searchTerm)));
@@ -729,8 +780,37 @@ const landingPages = (Array.isArray(landingPagesRaw) ? landingPagesRaw : [landin
     avgCpc: micros(l['metrics.average_cpc'] || 0),
     cpa: conv > 0 ? micros(l['metrics.cost_per_conversion']) : 0,
     cvr: clicks > 0 ? pct(conv / clicks) : 0,
+    mobileFriendlyClicksPct: nullablePctMetric(l, 'metrics.mobile_friendly_clicks_percentage'),
+    validAmpClicksPct: nullablePctMetric(l, 'metrics.valid_accelerated_mobile_pages_clicks_percentage'),
+    speedScore: nullableNumber(l['metrics.speed_score']),
   };
 });
+
+const expandedLandingPages = (Array.isArray(expandedLandingPagesRaw) ? expandedLandingPagesRaw : [expandedLandingPagesRaw]).filter(Boolean).map(l => {
+  const clicks = Number(l['metrics.clicks'] || 0);
+  const conv = Number(l['metrics.conversions'] || 0);
+  const campaignId = l['campaign.id'] || null;
+  return {
+    date: l['segments.date'] || null,
+    campaignId,
+    campaign: l['campaign.name'] || (campaignId ? campaignNameById.get(String(campaignId)) : null) || null,
+    adGroupId: l['ad_group.id'] || null,
+    adGroup: l['ad_group.name'] || null,
+    expandedFinalUrl: l['expanded_landing_page_view.expanded_final_url'],
+    spend: micros(l['metrics.cost_micros']),
+    clicks,
+    impressions: Number(l['metrics.impressions'] || 0),
+    conversions: conv,
+    ctr: pct(l['metrics.ctr'] || 0),
+    avgCpc: micros(l['metrics.average_cpc'] || 0),
+    cpa: conv > 0 ? micros(l['metrics.cost_per_conversion']) : 0,
+    cvr: clicks > 0 ? pct(conv / clicks) : 0,
+    mobileFriendlyClicksPct: nullablePctMetric(l, 'metrics.mobile_friendly_clicks_percentage'),
+    validAmpClicksPct: nullablePctMetric(l, 'metrics.valid_accelerated_mobile_pages_clicks_percentage'),
+    speedScore: nullableNumber(l['metrics.speed_score']),
+  };
+});
+
 
 const auctionInsights = (Array.isArray(auctionInsightsRaw) ? auctionInsightsRaw : [auctionInsightsRaw]).filter(Boolean).map(a => {
   const domain = a['segments.auction_insight_domain'];
@@ -922,6 +1002,8 @@ const payload = {
   clickPaths,
   qualityScores: qualityScoreData,
   landingPages,
+  expandedLandingPages,
+
   auctionInsights,
   auctionInsightsStatus,
   competitorBreakdown,
