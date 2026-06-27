@@ -3,13 +3,25 @@ const fs = require('fs');
 const readline = require('readline');
 
 // The MCP uses the API Base and API Key from the environment
-let API_BASE = process.env.API_BASE || 'http://localhost:8080';
+let API_BASE = process.env.API_BASE || 'http://localhost:7860';
 if (API_BASE && !API_BASE.startsWith('http')) API_BASE = 'http://' + API_BASE;
 const API_KEY = process.env.SECRET_API_KEY;
+const HF_TOKEN = process.env.HF_TOKEN || '';
 
 if (!API_KEY) {
     console.error('ERROR: SECRET_API_KEY environment variable is required.');
     process.exit(1);
+}
+
+function mcpHeaders(extraHeaders = {}) {
+    const headers = { ...extraHeaders };
+    if (HF_TOKEN) {
+        headers['Authorization'] = `Bearer ${HF_TOKEN}`;
+        headers['X-API-Key'] = API_KEY;
+    } else {
+        headers['Authorization'] = `Bearer ${API_KEY}`;
+    }
+    return headers;
 }
 
 const rl = readline.createInterface({
@@ -32,22 +44,22 @@ rl.on('line', async (line) => {
             try {
                 const proxyRes = await fetch(`${API_BASE}/api/mcp`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
+                    headers: mcpHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ method: 'tools/list' })
                 });
                 const remoteData = proxyRes.ok ? await proxyRes.json() : { tools: [] };
                 const remoteTools = (remoteData.tools || []).filter(tool => tool && tool.name !== 'get_dashboard_data');
-                
+
                 sendResponse(req.id, {
                     tools: [
                         {
                             name: 'get_dashboard_data',
                             description: 'Fetches the Google Ads dashboard data. Provide a section (e.g. "keywords", "searchTerms", "keywordPlanner", "campaigns", "dailyTrend", "summary") to fetch full specific data without payload overload.',
-                            inputSchema: { 
-                                type: 'object', 
+                            inputSchema: {
+                                type: 'object',
                                 properties: {
                                     section: { type: 'string', description: 'Specific key to extract (e.g., keywords)' }
-                                } 
+                                }
                             }
                         },
                         ...remoteTools
@@ -60,11 +72,11 @@ rl.on('line', async (line) => {
                     tools: [{
                         name: 'get_dashboard_data',
                         description: 'Fetches the Google Ads dashboard data. Provide a section such as keywords, searchTerms, keywordPlanner, campaigns, dailyTrend, or summary.',
-                        inputSchema: { 
-                            type: 'object', 
+                        inputSchema: {
+                            type: 'object',
                             properties: {
                                 section: { type: 'string' }
-                            } 
+                            }
                         }
                     }]
                 });
@@ -73,21 +85,21 @@ rl.on('line', async (line) => {
             if (req.params.name === 'get_dashboard_data') {
                 try {
                     const res = await fetch(`${API_BASE}/api/dashboard`, {
-                        headers: { 'Authorization': `Bearer ${API_KEY}` }
+                        headers: mcpHeaders()
                     });
                     if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                     let data = await res.json();
-                    
+
                     const section = req.params.arguments?.section;
                     if (section && data[section]) {
                         // Return the full untruncated array for the requested section
                         data = { [section]: data[section] };
                     } else if (!section) {
                         // Default to just the summary payload to prevent crashing on full dump
-                        data = { 
+                        data = {
                             error: "You requested the full payload which is too large. Returned summary only. Call again with section='keywords', 'searchTerms', 'campaigns', etc. to get full arrays.",
-                            summary: data.summary, 
-                            periodComparison: data.periodComparison 
+                            summary: data.summary,
+                            periodComparison: data.periodComparison
                         };
                     }
 
@@ -105,13 +117,13 @@ rl.on('line', async (line) => {
                 try {
                     const proxyRes = await fetch(`${API_BASE}/api/mcp`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
+                        headers: mcpHeaders({ 'Content-Type': 'application/json' }),
                         body: JSON.stringify({ method: 'tools/call', params: req.params })
                     });
-                    
+
                     const result = await proxyRes.json();
                     if (!proxyRes.ok) throw new Error(result.error || `HTTP error ${proxyRes.status}`);
-                    
+
                     sendResponse(req.id, result);
                 } catch (err) {
                     console.error(`[MCP Proxy Error] Failed to call tool: ${err.message}`);

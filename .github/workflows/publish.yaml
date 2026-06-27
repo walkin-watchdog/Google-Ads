@@ -1,0 +1,26 @@
+# name: Sync to Hugging Face Hub
+# on:
+#   push:
+#     branches: [main]
+# jobs:
+#   sync:
+#     runs-on: ubuntu-latest
+#     permissions:
+#       id-token: write # Required to fetch short-lived OIDC token
+#       contents: read
+#     steps:
+#       - uses: actions/checkout@v4
+      
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.x'
+
+#       - name: Install huggingface_hub
+#         run: pip install huggingface_hub
+
+#       - name: Upload to Hugging Face Hub
+#         env:
+#           HF_OIDC_RESOURCE: spaces/YOUR_HF_USERNAME/YOUR_SPACE_NAME
+#         run: |
+#           hf upload YOUR_HF_USERNAME/YOUR_SPACE_NAME . . --repo-type=space

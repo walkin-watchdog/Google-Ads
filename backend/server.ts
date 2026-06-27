@@ -52,7 +52,7 @@ import {
 } from './lib/semanticMemory';
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 7860;
 const serveDashboardClient = process.env.SERVE_DASHBOARD_CLIENT === 'true';
 const dashboardClientPath = path.join(__dirname, 'client');
 

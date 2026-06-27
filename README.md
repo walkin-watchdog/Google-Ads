@@ -1,3 +1,13 @@
+---
+title: Google Ads Cloud Dashboard
+emoji: 📊
+colorFrom: yellow
+colorTo: red
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Google Ads Cloud Dashboard
 
 This repository contains the complete Google Ads Dashboard, backed by a server architected for the Cloud. It uses a **Cloud Architecture** to fetch Google Ads data, stores it in PostgreSQL, and serves it to a lightweight local UI.
@@ -14,9 +24,9 @@ Backend remains deterministic and evidence-producing, while the AI does judgment
 
 ---
 
-## ☁️ Deployment Guide (Render.com)
+## ☁️ Deployment Guide
 
-We will use **Render.com** for a free Web Service container and **Neon.tech** for a permanently free PostgreSQL database (Render's free DB deletes itself after 30 days).
+We will use **Neon.tech** for a permanently free PostgreSQL database (Render's free DB deletes itself after 30 days, Neon is permanently free). For the web service hosting, we recommend **Hugging Face Spaces** because it supports Docker deployments with **100% free, unlimited outbound bandwidth** and runs on 16 GB RAM. Alternatively, you can deploy on **Render.com** (which has a 5 GB/month bandwidth limit).
 
 ### Step 1: Create the Database
 1. Go to [Neon.tech](https://neon.tech) and sign up/log in.
@@ -24,19 +34,28 @@ We will use **Render.com** for a free Web Service container and **Neon.tech** fo
 3. On your dashboard, find the **Connection Details**.
 4. Copy the **Postgres Connection String** with Connection Pooling enabled (e.g., `postgresql://neondb_owner:password@ep-cool-db-pooler.region.aws.neon.tech/neondb?sslmode=require&channel_binding=require`).
 
-### Step 2: Deploy the Web Service
-1. Go to [Render.com](https://render.com) and log in. In your Dashboard, click **New +** and select **Web Service**.
-2. Connect your GitHub repository containing this code.
-3. Configure the service:
-   - **Root Directory:** *(leave blank)*
-   - **Environment:** `Node`
-   - **Build Command:** `cd backend && bun install`
-   - **Start Command:** `cd backend && bun run server.ts`
-   - **Instance Type:** Free
-4. Scroll down to **Environment Variables** and add:
+---
+
+### Step 2: Deploy on Hugging Face Spaces (Recommended - Unlimited Bandwidth)
+
+Hugging Face Spaces will automatically build your app using the root-level `Dockerfile` and host it for free.
+
+1. Go to [Hugging Face Spaces](https://huggingface.co/spaces) and sign up/log in.
+2. Click **Create new Space**.
+3. Configure the Space settings:
+   - **Space Name:** Choose a name (e.g., `google-ads-dashboard`).
+   - **License:** Choose any license (e.g., `mit`).
+   - **SDK:** Select **Docker**.
+   - **Docker Template:** Select **Blank** (do not select any template).
+   - **Space Hardware:** Select **CPU Basic** (which is 100% free, 2 vCPUs, 16 GB RAM).
+   - **Space Visibility:** Select **Public** or **Private** (recommended Private to secure your dashboard, though the API is protected by `SECRET_API_KEY` regardless).
+4. Click **Create Space**.
+5. Go to your Space's **Settings** tab.
+6. Scroll down to **Variables and Secrets** and click **New secret** to add all the required environment variables:
    - `DATABASE_URL`: Paste the connection string from Neon in Step 1.
-   - `SECRET_API_KEY`: Create a strong random password (e.g., `MySuperSecretKey123!`). This secures your data.
-   - *Add all your Google Ads MCP credentials here too:*
+   - `SECRET_API_KEY`: Create a strong random password (e.g., `MySuperSecretKey123!`).
+   - `PORT`: Set this to `7860` (Hugging Face requires containers to listen on port `7860`).
+   - *Add your Google Ads MCP credentials:*
      - `GOOGLE_DEVELOPER_TOKEN`
      - `GOOGLE_CLIENT_ID`
      - `GOOGLE_CLIENT_SECRET`
@@ -47,11 +66,67 @@ We will use **Render.com** for a free Web Service container and **Neon.tech** fo
      - `KEYWORD_PLANNER_GEO_TARGETS` *(optional; defaults to India, `geoTargetConstants/2356`)*
      - `KEYWORD_PLANNER_LANGUAGE` *(optional; defaults to English, `languageConstants/1000`)*
      - `KEYWORD_PLANNER_REFRESH_INTERVAL_HOURS` *(optional; defaults to `24`; set `0` to fetch Planner data on every refresh)*
-   - `PUBLIC_DASHBOARD_BASE_URL`: Public backend URL used when MCP creates dashboard magic links.
-   - `SERVE_DASHBOARD_CLIENT`: Set to `true` only when using backend-hosted dashboard access through magic links.
-   - `DASHBOARD_CORS_ORIGINS`: Optional comma-separated extra browser origins. `file://`, `localhost`, `127.0.0.1`, and the public dashboard origin are allowed automatically.
-   - `DASHBOARD_COOKIE_SECURE`: Optional override. Leave unset; the server sets secure cookies for production, HTTPS public URLs, or HTTPS forwarded requests.
-5. Click **Create Web Service**. Wait 2-3 minutes for it to build and deploy. 
+   - `PUBLIC_DASHBOARD_BASE_URL`: Public URL of your Space once deployed (e.g., `https://username-space-name.hf.space`).
+   - `SERVE_DASHBOARD_CLIENT`: Set to `true` to access the dashboard through magic links.
+   - `DASHBOARD_CORS_ORIGINS`: Optional comma-separated extra browser origins.
+7. Push your repository's code to the Hugging Face Space repository:
+   
+   Unlike Render, Hugging Face Spaces doesn't have a direct "one-click GitHub connect" button. Choose one of the two methods below to deploy your code:
+
+   *   **Method A: Push directly from your local machine (Easiest)**
+       1. In your local terminal, add the Hugging Face Space as a new git remote:
+          ```bash
+          git remote add hf https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME
+          ```
+       2. Generate a Hugging Face **Access Token** with `write` permission in your [Hugging Face Token Settings](https://huggingface.co/settings/tokens).
+       3. Push your code directly:
+          ```bash
+          git push hf main
+          ```
+          *(When prompted for password, paste the Hugging Face Access Token you generated).*
+
+   *   **Method B: Setup Tokenless Sync via Trusted Publishers (Recommended)**
+       1. Go to your repository settings on the Hugging Face Hub (e.g., `https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE_NAME/settings`).
+       2. Find the **Trusted Publishers** section and click **Add a new publisher**.
+       3. Configure the publisher details:
+          - **Provider:** Select `GitHub Actions`.
+          - **GitHub Repository Org/Name:** `YOUR_GITHUB_ORG/YOUR_GITHUB_REPO`.
+          - **Branch:** `main` (or your default branch).
+          - **Workflow:** `publish.yml` (the filename of the GitHub Action workflow we will create).
+       4. In your local repository, create a file at `.github/workflows/publish.yml` with the following content:
+          ```yaml
+          name: Sync to Hugging Face Hub
+          on:
+            push:
+              branches: [main]
+          jobs:
+            sync:
+              runs-on: ubuntu-latest
+              permissions:
+                id-token: write # Required to fetch short-lived OIDC token
+                contents: read
+              steps:
+                - uses: actions/checkout@v4
+                
+                - name: Set up Python
+                  uses: actions/setup-python@v5
+                  with:
+                    python-version: '3.x'
+
+                - name: Install huggingface_hub
+                  run: pip install huggingface_hub
+
+                - name: Upload to Hugging Face Hub
+                  env:
+                    HF_OIDC_RESOURCE: spaces/YOUR_HF_USERNAME/YOUR_SPACE_NAME
+                  run: |
+                    hf upload YOUR_HF_USERNAME/YOUR_SPACE_NAME . . --repo-type=space
+          ```
+       5. Commit and push this file to GitHub. On every push to `main`, GitHub Actions will authenticate securely using short-lived tokens and deploy to Hugging Face!
+
+8. Hugging Face will build the container from the `Dockerfile` and start the server.
+
+---
 
 ### Step 3: Setup the Cron Job (Keep-Alive)
 Render's free tier sleeps after 15 minutes. To prevent 50-second cold starts, we'll keep it awake 24/7.
@@ -59,7 +134,7 @@ Render's free tier sleeps after 15 minutes. To prevent 50-second cold starts, we
 2. Click **Create Cronjob**.
 3. **URL:** `https://your-render-app-name.onrender.com/api/trigger-refresh`
 4. **Execution Schedule:** Every 14 minutes. *(This resets Render's 15-minute sleep timer)*
-5. **Advanced Options > HTTP Headers:** Add `Authorization` with value `Bearer YOUR_SECRET_API_KEY`.
+5. **Advanced Options > HTTP Headers:** Add `Authorization` with value `Bearer YOUR_HF_TOKEN`.
 6. **HTTP Method:** `POST`.
 7. Save. Your app will stay awake permanently and data will refresh every 14 mins!
 
@@ -106,8 +181,9 @@ We have created a custom MCP specifically for your team's AI Agents. It pulls da
          "command": "bun",
           "args": ["/absolute/path/to/MCP/mcp-server.js"],
           "env": {
-            "API_BASE": "https://your-render-app.com",
-            "SECRET_API_KEY": "your_secure_password"
+            "API_BASE": "https://your-username-space-name.hf.space",
+            "SECRET_API_KEY": "your_secure_password",
+            "HF_TOKEN": "your_hugging_face_read_token_if_private_space"
          }
        }
      }
