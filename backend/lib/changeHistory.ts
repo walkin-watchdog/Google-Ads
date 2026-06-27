@@ -92,14 +92,24 @@ export async function ensureChangeHistorySchema(pool: Pool): Promise<void> {
 export async function archiveChangeHistoryRows(pool: Pool, rows: any[]): Promise<number> {
     const events = normalizeChangeHistoryRows(rows);
     if (events.length === 0) return 0;
+
+    // De-duplicate events by event_uid to prevent PostgreSQL "cannot affect row a second time" error
+    // which occurs if the same event_uid appears multiple times in the same batch insert.
+    const seenUids = new Set<string>();
+    const uniqueEvents = events.filter(event => {
+        if (seenUids.has(event.event_uid)) return false;
+        seenUids.add(event.event_uid);
+        return true;
+    });
+
     await ensureChangeHistorySchema(pool);
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
 
         const BATCH_SIZE = 100;
-        for (let i = 0; i < events.length; i += BATCH_SIZE) {
-            const batch = events.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < uniqueEvents.length; i += BATCH_SIZE) {
+            const batch = uniqueEvents.slice(i, i + BATCH_SIZE);
             const valueStrings: string[] = [];
             const values: any[] = [];
 
@@ -141,7 +151,7 @@ export async function archiveChangeHistoryRows(pool: Pool, rows: any[]): Promise
         }
 
         await client.query('COMMIT');
-        return events.length;
+        return uniqueEvents.length;
     } catch (err) {
         await client.query('ROLLBACK');
         throw err;

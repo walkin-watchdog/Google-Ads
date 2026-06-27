@@ -286,14 +286,15 @@ async function run() {
         };
         console.log(` -> ${auctionResult.message}`);
 
-        console.log('All reports fetched. Running candidate signal engine...');
-        await runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'deterministic_rules.ts')]);
+        console.log('Running rule engines and checkers in parallel...');
+        await Promise.all([
+            runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'deterministic_rules.ts')]),
+            runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'telemetry_checker.ts')]),
+            runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'impact_evaluator.ts')])
+        ]);
 
         console.log('Rebuilding dashboard payload...');
         await runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'build_dashboard_payload.ts'), '--start-date', startDateStr, '--end-date', endDateStr]);
-
-        await runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'telemetry_checker.ts')]);
-        await runScriptAsync('bun', ['run', path.join(ROOT, 'scripts', 'impact_evaluator.ts')]);
 
         if (pool) {
             const finalStatus = failedReports.length > 0 ? 'partial' : 'succeeded';
