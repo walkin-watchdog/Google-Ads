@@ -13,6 +13,20 @@ const STATUS_RANK: Record<LeadStatus, number> = {
 };
 
 const TERMINAL_STATUSES = new Set<LeadStatus>(['converted', 'qualified_lost', 'useless']);
+const leadSchemaReadyByPool = new WeakMap<object, Promise<void>>();
+
+type LeadAttributionSummaryMode = 'full' | 'overview';
+type LeadAttributionSummaryOptions = {
+    mode?: LeadAttributionSummaryMode;
+};
+
+type LeadAttributionOverviewCacheEntry = {
+    expiresAt: number;
+    summary: any;
+};
+
+const DEFAULT_LEAD_ATTRIBUTION_OVERVIEW_CACHE_SECONDS = 60;
+const leadAttributionOverviewCache = new Map<string, LeadAttributionOverviewCacheEntry>();
 
 export class LeadValidationError extends Error {
     constructor(message: string) {
@@ -34,6 +48,7 @@ export interface NormalizedLeadEvent {
     utm_source: string | null;
     utm_medium: string | null;
     utm_campaign: string | null;
+    ad_group_id: string | null;
     utm_term: string | null;
     utm_content: string | null;
     keyword: string | null;
@@ -159,6 +174,18 @@ export function normalizeLeadWebhookPayload(raw: any): NormalizedLeadEvent {
         utm_source: clean(body.utm_source),
         utm_medium: clean(body.utm_medium),
         utm_campaign: clean(body.utm_campaign),
+        ad_group_id: firstClean(
+            body.ad_group_id,
+            body.adGroupId,
+            body.google_ad_group_id,
+            body.googleAdGroupId,
+            googleAds.ad_group_id,
+            googleAds.adGroupId,
+            attribution.ad_group_id,
+            attribution.adGroupId,
+            body.utm_ad_group,
+            body.utm_adgroup
+        ),
         utm_term: utmTerm,
         utm_content: utmContent,
         keyword: firstClean(
@@ -201,6 +228,18 @@ export function normalizeLeadWebhookPayload(raw: any): NormalizedLeadEvent {
 }
 
 export async function ensureLeadSchema(pool: Pool): Promise<void> {
+    const key = pool as unknown as object;
+    const existing = leadSchemaReadyByPool.get(key);
+    if (existing) return existing;
+    const ready = ensureLeadSchemaInternal(pool).catch(err => {
+        leadSchemaReadyByPool.delete(key);
+        throw err;
+    });
+    leadSchemaReadyByPool.set(key, ready);
+    return ready;
+}
+
+async function ensureLeadSchemaInternal(pool: Pool): Promise<void> {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS lead_events (
             event_id VARCHAR(160) PRIMARY KEY,
@@ -215,6 +254,7 @@ export async function ensureLeadSchema(pool: Pool): Promise<void> {
             utm_source TEXT,
             utm_medium TEXT,
             utm_campaign TEXT,
+            ad_group_id TEXT,
             utm_term TEXT,
             utm_content TEXT,
             keyword TEXT,
@@ -229,12 +269,33 @@ export async function ensureLeadSchema(pool: Pool): Promise<void> {
             payload JSONB NOT NULL DEFAULT '{}'::jsonb
         );
         CREATE INDEX IF NOT EXISTS lead_events_session_key_idx ON lead_events(session_key);
+        CREATE INDEX IF NOT EXISTS lead_events_session_key_time_idx
+            ON lead_events(session_key, (COALESCE(submitted_at, received_at)), received_at);
         CREATE INDEX IF NOT EXISTS lead_events_utm_campaign_idx ON lead_events(utm_campaign);
         CREATE INDEX IF NOT EXISTS lead_events_utm_term_idx ON lead_events(utm_term);
+        ALTER TABLE lead_events ADD COLUMN IF NOT EXISTS ad_group_id TEXT;
         ALTER TABLE lead_events ADD COLUMN IF NOT EXISTS keyword TEXT;
         ALTER TABLE lead_events ADD COLUMN IF NOT EXISTS match_type TEXT;
+        CREATE INDEX IF NOT EXISTS lead_events_ad_group_id_idx ON lead_events(ad_group_id);
         UPDATE lead_events
         SET
+            ad_group_id = COALESCE(
+                ad_group_id,
+                NULLIF(payload #>> '{webhook,request,body,ad_group_id}', ''),
+                NULLIF(payload #>> '{webhook,request,body,adGroupId}', ''),
+                NULLIF(payload #>> '{request,body,ad_group_id}', ''),
+                NULLIF(payload #>> '{request,body,adGroupId}', ''),
+                NULLIF(payload #>> '{body,ad_group_id}', ''),
+                NULLIF(payload #>> '{body,adGroupId}', ''),
+                NULLIF(payload #>> '{body,google_ads,ad_group_id}', ''),
+                NULLIF(payload #>> '{body,googleAds,adGroupId}', ''),
+                NULLIF(payload #>> '{body,attribution,ad_group_id}', ''),
+                NULLIF(payload #>> '{body,attribution,adGroupId}', ''),
+                NULLIF(payload ->> 'ad_group_id', ''),
+                NULLIF(payload ->> 'adGroupId', ''),
+                NULLIF(payload ->> 'utm_ad_group', ''),
+                NULLIF(payload ->> 'utm_adgroup', '')
+            ),
             keyword = COALESCE(
                 keyword,
                 NULLIF(payload #>> '{webhook,request,body,keyword}', ''),
@@ -278,7 +339,7 @@ export async function ensureLeadSchema(pool: Pool): Promise<void> {
                     ELSE NULL
                 END
             )
-        WHERE keyword IS NULL OR match_type IS NULL;
+        WHERE ad_group_id IS NULL OR keyword IS NULL OR match_type IS NULL;
 
         CREATE TABLE IF NOT EXISTS lead_sessions (
             session_key VARCHAR(220) PRIMARY KEY,
@@ -294,6 +355,10 @@ export async function ensureLeadSchema(pool: Pool): Promise<void> {
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS lead_sessions_status_idx ON lead_sessions(status);
+        CREATE INDEX IF NOT EXISTS lead_sessions_first_seen_idx ON lead_sessions(first_seen);
+        CREATE INDEX IF NOT EXISTS lead_sessions_last_seen_idx ON lead_sessions(last_seen DESC);
+        CREATE INDEX IF NOT EXISTS lead_sessions_utm_campaign_expr_idx ON lead_sessions ((attribution->>'utm_campaign'));
+        CREATE INDEX IF NOT EXISTS lead_sessions_ad_group_expr_idx ON lead_sessions ((attribution->>'ad_group_id'));
     `);
 }
 
@@ -314,7 +379,7 @@ async function rebuildLeadSession(pool: Pool, sessionKey: string): Promise<void>
     const leadIds = Array.from(new Set(rows.map(row => row.lead_id).filter(Boolean)));
     const firstValue = (field: string) => clean(rows.find(row => clean(row[field]))?.[field]);
     const latestValue = (field: string) => clean(reversedRows.find(row => clean(row[field]))?.[field]);
-    const attributionSource = rows.find(row => row.utm_campaign || row.utm_term || row.gclid || row.gbraid || row.wbraid || row.keyword || row.match_type) || first;
+    const attributionSource = rows.find(row => row.utm_campaign || row.ad_group_id || row.utm_term || row.gclid || row.gbraid || row.wbraid || row.keyword || row.match_type) || first;
     const utmContent = firstValue('utm_content') || attributionSource.utm_content || null;
     const firstSeen = first.submitted_at || first.received_at;
     const lastSeen = latest.submitted_at || latest.received_at;
@@ -352,6 +417,7 @@ async function rebuildLeadSession(pool: Pool, sessionKey: string): Promise<void>
                 utm_source: firstValue('utm_source') || attributionSource.utm_source || null,
                 utm_medium: firstValue('utm_medium') || attributionSource.utm_medium || null,
                 utm_campaign: firstValue('utm_campaign') || attributionSource.utm_campaign || null,
+                ad_group_id: firstValue('ad_group_id') || attributionSource.ad_group_id || null,
                 utm_term: firstValue('utm_term') || attributionSource.utm_term || null,
                 utm_content: utmContent,
                 keyword: firstValue('keyword') || attributionSource.keyword || firstValue('utm_term') || attributionSource.utm_term || null,
@@ -370,9 +436,9 @@ export async function upsertLeadWebhookEvent(pool: Pool, raw: any): Promise<Norm
     await pool.query(
         `INSERT INTO lead_events
          (event_id, session_key, session_key_type, kind, lead_id, session_id, gclid, gbraid, wbraid,
-          utm_source, utm_medium, utm_campaign, utm_term, utm_content, keyword, match_type, name, email, phone,
+          utm_source, utm_medium, utm_campaign, ad_group_id, utm_term, utm_content, keyword, match_type, name, email, phone,
           status, status_rank, submitted_at, payload)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
          ON CONFLICT (event_id) DO UPDATE SET
             kind = COALESCE(EXCLUDED.kind, lead_events.kind),
             lead_id = COALESCE(EXCLUDED.lead_id, lead_events.lead_id),
@@ -383,6 +449,7 @@ export async function upsertLeadWebhookEvent(pool: Pool, raw: any): Promise<Norm
             utm_source = COALESCE(EXCLUDED.utm_source, lead_events.utm_source),
             utm_medium = COALESCE(EXCLUDED.utm_medium, lead_events.utm_medium),
             utm_campaign = COALESCE(EXCLUDED.utm_campaign, lead_events.utm_campaign),
+            ad_group_id = COALESCE(EXCLUDED.ad_group_id, lead_events.ad_group_id),
             utm_term = COALESCE(EXCLUDED.utm_term, lead_events.utm_term),
             utm_content = COALESCE(EXCLUDED.utm_content, lead_events.utm_content),
             keyword = COALESCE(EXCLUDED.keyword, lead_events.keyword),
@@ -407,6 +474,7 @@ export async function upsertLeadWebhookEvent(pool: Pool, raw: any): Promise<Norm
             event.utm_source,
             event.utm_medium,
             event.utm_campaign,
+            event.ad_group_id,
             event.utm_term,
             event.utm_content,
             event.keyword,
@@ -421,6 +489,7 @@ export async function upsertLeadWebhookEvent(pool: Pool, raw: any): Promise<Norm
         ]
     );
     await rebuildLeadSession(pool, event.session_key);
+    clearLeadAttributionSummaryCache();
     return event;
 }
 
@@ -441,17 +510,33 @@ export async function recordLeadStatus(pool: Pool, input: { sessionKey: string; 
         [eventId, sessionKey, status, STATUS_RANK[status], { status, note: input.note || null }]
     );
     await rebuildLeadSession(pool, sessionKey);
+    clearLeadAttributionSummaryCache();
 }
 
 function campaignSpendMap(dashboardData: any): Map<string, { campaignId: string; campaignName: string | null; spend: number }> {
     const out = new Map<string, { campaignId: string; campaignName: string | null; spend: number }>();
-    for (const row of Array.isArray(dashboardData?.campaigns) ? dashboardData.campaigns : []) {
+    const rows = Array.isArray(dashboardData?.campaigns) ? dashboardData.campaigns : [];
+    const nameToIds = new Map<string, Set<string>>();
+    for (const row of rows) {
+        const id = clean(row.id || row.campaignId);
+        const campaignName = clean(row.name || row.campaign);
+        if (!id || !campaignName) continue;
+        const ids = nameToIds.get(campaignName) || new Set<string>();
+        ids.add(id);
+        nameToIds.set(campaignName, ids);
+    }
+    for (const row of rows) {
         const id = clean(row.id || row.campaignId);
         if (!id) continue;
-        const current = out.get(id) || { campaignId: id, campaignName: row.name || row.campaign || null, spend: 0 };
+        const campaignName = clean(row.name || row.campaign);
+        const current = out.get(id) || { campaignId: id, campaignName: campaignName || null, spend: 0 };
         current.spend += Number(row.spend || 0);
-        if (!current.campaignName && (row.name || row.campaign)) current.campaignName = row.name || row.campaign;
+        if (!current.campaignName && campaignName) current.campaignName = campaignName;
         out.set(id, current);
+    }
+    for (const current of Array.from(new Set(out.values()))) {
+        if (!current.campaignName) continue;
+        if ((nameToIds.get(current.campaignName)?.size || 0) === 1) out.set(current.campaignName, current);
     }
     return out;
 }
@@ -484,6 +569,157 @@ function emptyLeadBucket(extra: Record<string, any> = {}): any {
         qualifiedPipeline: 0,
         qualifiedOrConverted: 0,
         ...extra
+    };
+}
+
+function overviewCacheSeconds(): number {
+    const value = Number(process.env.LEAD_ATTRIBUTION_OVERVIEW_CACHE_SECONDS);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : DEFAULT_LEAD_ATTRIBUTION_OVERVIEW_CACHE_SECONDS;
+}
+
+function cloneJson<T>(value: T): T {
+    return typeof structuredClone === 'function'
+        ? structuredClone(value)
+        : JSON.parse(JSON.stringify(value));
+}
+
+function leadAttributionOverviewCacheKey(dashboardData: any): string {
+    const range = dashboardDateRange(dashboardData);
+    const scope = dashboardLeadScope(dashboardData);
+    return [
+        'lead-overview',
+        dashboardData?.meta?.accountId || 'unknown',
+        range.start || '',
+        range.end || '',
+        scope.campaignId || '',
+        scope.campaignNames.join('|'),
+        scope.adGroupId || '',
+        scope.adGroupNames.join('|')
+    ].join(':');
+}
+
+export function clearLeadAttributionSummaryCache(): void {
+    leadAttributionOverviewCache.clear();
+}
+
+type LeadAttributionScope = {
+    campaignId: string | null;
+    campaignNames: string[];
+    adGroupId: string | null;
+    adGroupNames: string[];
+};
+
+function matchingName(rows: any[], selectedId: string | null, idFields: string[], nameFields: string[]): string | null {
+    if (!selectedId) return null;
+    for (const row of rows) {
+        const ids = idFields.map(field => clean(row?.[field])).filter((value): value is string => Boolean(value));
+        if (!ids.includes(selectedId)) continue;
+        return nameFields.map(field => clean(row?.[field])).find((value): value is string => Boolean(value)) || null;
+    }
+    return null;
+}
+
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+    return Array.from(new Set(values.map(value => clean(value)).filter((value): value is string => Boolean(value))));
+}
+
+function dashboardLeadScope(dashboardData: any): LeadAttributionScope {
+    const filters = dashboardData?.meta?.filters || {};
+    const campaignId = clean(filters.campaignId);
+    const adGroupId = clean(filters.adGroupId);
+    const campaigns = [
+        ...(Array.isArray(dashboardData?.campaigns) ? dashboardData.campaigns : []),
+        ...(Array.isArray(dashboardData?.filterOptions?.campaigns) ? dashboardData.filterOptions.campaigns : [])
+    ];
+    const adGroups = [
+        ...(Array.isArray(dashboardData?.adGroups) ? dashboardData.adGroups : []),
+        ...(Array.isArray(dashboardData?.filterOptions?.adGroups) ? dashboardData.filterOptions.adGroups : [])
+    ];
+    return {
+        campaignId,
+        campaignNames: uniqueNonEmpty([
+            matchingName(campaigns, campaignId, ['id', 'campaignId'], ['name', 'campaignName', 'campaign']),
+            matchingName(adGroups, campaignId, ['campaignId'], ['campaignName', 'campaign'])
+        ]),
+        adGroupId,
+        adGroupNames: uniqueNonEmpty([
+            matchingName(adGroups, adGroupId, ['id', 'adGroupId'], ['name', 'adGroupName', 'adGroup'])
+        ])
+    };
+}
+
+function leadAttributionScopeSummary(scope: LeadAttributionScope): Record<string, any> {
+    return {
+        campaignId: scope.campaignId,
+        campaignNames: scope.campaignNames,
+        adGroupId: scope.adGroupId,
+        adGroupNames: scope.adGroupNames,
+        level: scope.adGroupId ? 'ad_group' : scope.campaignId ? 'campaign' : 'account',
+        adGroupField: scope.adGroupId ? 'attribution.ad_group_id' : null
+    };
+}
+
+function sessionDateWhere(
+    dateRange: { start: string | null; end: string | null },
+    scope: LeadAttributionScope = { campaignId: null, campaignNames: [], adGroupId: null, adGroupNames: [] }
+): { where: string; params: any[] } {
+    const params: any[] = [];
+    const conditions: string[] = [];
+    if (dateRange.start) {
+        params.push(dateRange.start);
+        conditions.push(`first_seen >= $${params.length}::date`);
+    }
+    if (dateRange.end) {
+        params.push(dateRange.end);
+        conditions.push(`first_seen < ($${params.length}::date + INTERVAL '1 day')`);
+    }
+    if (scope.campaignId) {
+        params.push(uniqueNonEmpty([scope.campaignId, ...scope.campaignNames]));
+        conditions.push(`attribution->>'utm_campaign' = ANY($${params.length}::text[])`);
+    }
+    if (scope.adGroupId) {
+        params.push(uniqueNonEmpty([scope.adGroupId, ...scope.adGroupNames]));
+        conditions.push(`attribution->>'ad_group_id' = ANY($${params.length}::text[])`);
+    }
+    return {
+        where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+        params
+    };
+}
+
+function bumpLeadBucketByCount(bucket: any, statusValue: any, uniqueLeads: any, eventCount: any): void {
+    const status = normalizeStatus(statusValue);
+    const count = Number(uniqueLeads || 0);
+    bucket.uniqueLeads += count;
+    bucket.eventCount += Number(eventCount || 0);
+    if (status === 'new') bucket.new += count;
+    if (status === 'useless') bucket.useless += count;
+    if (status === 'qualified') bucket.qualified += count;
+    if (status === 'qualified_lost') bucket.qualifiedLost += count;
+    if (status === 'converted') bucket.converted += count;
+    if (status === 'qualified') bucket.inProgress += count;
+    if (TERMINAL_STATUSES.has(status)) bucket.terminal += count;
+    if (status === 'qualified' || status === 'converted' || status === 'qualified_lost') bucket.qualifiedPipeline += count;
+    if (status === 'qualified' || status === 'converted') bucket.qualifiedOrConverted += count;
+}
+
+function bucketFromStatusRows(rows: any[], extra: Record<string, any> = {}): any {
+    const bucket = emptyLeadBucket(extra);
+    for (const row of rows) {
+        bumpLeadBucketByCount(bucket, row.status, row.unique_leads, row.event_count);
+    }
+    return bucket;
+}
+
+function periodMetricsFromBucket(bucket: any): Record<string, number> {
+    return {
+        realConversions: Number(bucket.uniqueLeads || 0),
+        realQualified: Number(bucket.qualified || 0),
+        realQualifiedLost: Number(bucket.qualifiedLost || 0),
+        realConverted: Number(bucket.converted || 0),
+        realUseless: Number(bucket.useless || 0),
+        realNew: Number(bucket.new || 0),
+        realEventCount: Number(bucket.eventCount || 0)
     };
 }
 
@@ -670,11 +906,15 @@ function buildLeadRows(
         const leadIds = parseLeadIds(session.lead_ids);
         const utmTerm = clean(attribution.utm_term) || firstEventValue(sessionEvents, 'utm_term');
         const utmContent = clean(attribution.utm_content) || firstEventValue(sessionEvents, 'utm_content');
-        const campaignId = clean(attribution.utm_campaign) || firstEventValue(sessionEvents, 'utm_campaign');
+        const rawCampaignId = clean(attribution.utm_campaign) || firstEventValue(sessionEvents, 'utm_campaign');
+        const adGroupId = clean(attribution.ad_group_id) || firstEventValue(sessionEvents, 'ad_group_id');
+        const campaign = rawCampaignId ? spendByCampaign.get(rawCampaignId) : null;
+        const campaignId = campaign?.campaignId || rawCampaignId;
         const mergedAttribution = {
             utm_source: clean(attribution.utm_source) || firstEventValue(sessionEvents, 'utm_source'),
             utm_medium: clean(attribution.utm_medium) || firstEventValue(sessionEvents, 'utm_medium'),
-            utm_campaign: campaignId,
+            utm_campaign: rawCampaignId,
+            ad_group_id: adGroupId,
             utm_term: utmTerm,
             utm_content: utmContent,
             keyword: clean(attribution.keyword) || firstEventValue(sessionEvents, 'keyword') || utmTerm,
@@ -684,7 +924,6 @@ function buildLeadRows(
             wbraid: clean(attribution.wbraid) || firstEventValue(sessionEvents, 'wbraid')
         };
         const journey: any = journeyBySession.get(session.session_key) || {};
-        const campaign = campaignId ? spendByCampaign.get(campaignId) : null;
         return {
             sessionKey: session.session_key,
             sessionKeyType: session.session_key_type,
@@ -702,7 +941,8 @@ function buildLeadRows(
             attribution: mergedAttribution,
             campaign: campaignId ? {
                 campaignId,
-                campaignName: campaign?.campaignName || null
+                campaignName: campaign?.campaignName || null,
+                utmCampaign: rawCampaignId && rawCampaignId !== campaignId ? rawCampaignId : null
             } : null,
             hasClickId: hasClickId(mergedAttribution),
             offlineConversionReady: ['qualified', 'converted'].includes(normalizeStatus(session.status)) && hasClickId(mergedAttribution),
@@ -749,20 +989,208 @@ function dashboardDateRange(dashboardData: any): { start: string | null; end: st
     };
 }
 
-export async function getLeadAttributionSummary(pool: Pool, dashboardData: any): Promise<any> {
-    await ensureLeadSchema(pool);
+function periodRange(label: any): { start: string; end: string } | null {
+    const text = String(label || '');
+    const match = text.match(/(\d{4}-\d{2}-\d{2})\s*[-–]\s*(\d{4}-\d{2}-\d{2})/);
+    return match ? { start: match[1], end: match[2] } : null;
+}
+
+async function aggregateLeadBucketForRange(pool: Pool, range: { start: string; end: string } | null, scope: LeadAttributionScope): Promise<any> {
+    if (!range) return emptyLeadBucket();
+    const { where, params } = sessionDateWhere({ start: range.start, end: range.end }, scope);
+    const { rows } = await pool.query(
+        `SELECT status, COUNT(*)::int AS unique_leads, COALESCE(SUM(event_count), 0)::int AS event_count
+         FROM lead_sessions
+         ${where}
+         GROUP BY status`,
+        params
+    );
+    return bucketFromStatusRows(rows);
+}
+
+async function buildLeadAttributionOverviewSummary(pool: Pool, dashboardData: any): Promise<any> {
+    const ttlSeconds = overviewCacheSeconds();
+    const cacheKey = leadAttributionOverviewCacheKey(dashboardData);
+    const now = Date.now();
+    const cached = ttlSeconds > 0 ? leadAttributionOverviewCache.get(cacheKey) : null;
+    if (cached && cached.expiresAt > now) return cloneJson(cached.summary);
+
     const dateRange = dashboardDateRange(dashboardData);
-    const sessionParams: any[] = [];
-    const sessionConditions: string[] = [];
-    if (dateRange.start) {
-        sessionParams.push(dateRange.start);
-        sessionConditions.push(`first_seen >= $${sessionParams.length}::date`);
+    const scope = dashboardLeadScope(dashboardData);
+    const { where, params } = sessionDateWhere(dateRange, scope);
+    const spendByCampaign = campaignSpendMap(dashboardData);
+    const [
+        totalsResult,
+        byCampaignResult,
+        bySearchTermResult,
+        recentResult,
+        offlineResult,
+        previousPeriodBucket,
+        currentPeriodBucket
+    ] = await Promise.all([
+        pool.query(
+            `SELECT status, COUNT(*)::int AS unique_leads, COALESCE(SUM(event_count), 0)::int AS event_count
+             FROM lead_sessions
+             ${where}
+             GROUP BY status`,
+            params
+        ),
+        pool.query(
+            `SELECT campaign_id, status, COUNT(*)::int AS unique_leads, COALESCE(SUM(event_count), 0)::int AS event_count
+             FROM (
+                SELECT COALESCE(NULLIF(attribution->>'utm_campaign', ''), '(none)') AS campaign_id, status, event_count
+                FROM lead_sessions
+                ${where}
+             ) sessions
+             GROUP BY campaign_id, status`,
+            params
+        ),
+        pool.query(
+            `SELECT campaign_id, search_term, keyword, match_type, status, COUNT(*)::int AS unique_leads, COALESCE(SUM(event_count), 0)::int AS event_count
+             FROM (
+                SELECT
+                    COALESCE(NULLIF(attribution->>'utm_campaign', ''), '(none)') AS campaign_id,
+                    COALESCE(NULLIF(attribution->>'utm_term', ''), NULLIF(attribution->>'keyword', ''), '(none)') AS search_term,
+                    NULLIF(attribution->>'keyword', '') AS keyword,
+                    NULLIF(attribution->>'match_type', '') AS match_type,
+                    status,
+                    event_count
+                FROM lead_sessions
+                ${where}
+             ) sessions
+             GROUP BY campaign_id, search_term, keyword, match_type, status`,
+            params
+        ),
+        pool.query(
+            `SELECT session_key, session_key_type, status, status_rank, event_count, lead_ids, attribution, contact, first_seen, last_seen
+             FROM lead_sessions
+             ${where}
+             ORDER BY last_seen DESC
+             LIMIT 50`,
+            params
+        ),
+        pool.query(
+            `SELECT
+                COUNT(*) FILTER (WHERE status = 'new')::int AS needs_review,
+                COUNT(*) FILTER (WHERE status IN ('qualified', 'converted'))::int AS qualified_or_converted,
+                COUNT(*) FILTER (
+                    WHERE status IN ('qualified', 'converted')
+                      AND (
+                        NULLIF(attribution->>'gclid', '') IS NOT NULL
+                        OR NULLIF(attribution->>'gbraid', '') IS NOT NULL
+                        OR NULLIF(attribution->>'wbraid', '') IS NOT NULL
+                      )
+                )::int AS ready_rows
+             FROM lead_sessions
+             ${where}`,
+            params
+        ),
+        aggregateLeadBucketForRange(pool, periodRange(dashboardData?.periodComparison?.previousPeriod?.label), scope),
+        aggregateLeadBucketForRange(pool, periodRange(dashboardData?.periodComparison?.currentPeriod?.label), scope)
+    ]);
+
+    const totals = bucketFromStatusRows(totalsResult.rows);
+    const byCampaign = new Map<string, any>();
+    for (const row of byCampaignResult.rows) {
+        const rawCampaignId = clean(row.campaign_id) || '(none)';
+        const campaignSpend = spendByCampaign.get(rawCampaignId);
+        const campaignId = campaignSpend?.campaignId || rawCampaignId;
+        const bucket = byCampaign.get(campaignId) || emptyLeadBucket({
+            campaignId,
+            campaignName: campaignSpend?.campaignName || null,
+            spend: campaignSpend?.spend || 0,
+            trueCpa: 0,
+            qualifiedCpa: 0,
+            convertedCpa: 0,
+            customerCpa: 0
+        });
+        bumpLeadBucketByCount(bucket, row.status, row.unique_leads, row.event_count);
+        byCampaign.set(campaignId, bucket);
     }
-    if (dateRange.end) {
-        sessionParams.push(dateRange.end);
-        sessionConditions.push(`first_seen < ($${sessionParams.length}::date + INTERVAL '1 day')`);
+
+    const bySearchTerm = new Map<string, any>();
+    for (const row of bySearchTermResult.rows) {
+        const rawCampaignId = clean(row.campaign_id) || '(none)';
+        const campaignSpend = spendByCampaign.get(rawCampaignId);
+        const campaignId = campaignSpend?.campaignId || rawCampaignId;
+        const term = clean(row.search_term) || '(none)';
+        const key = `${campaignId}|${term}|${clean(row.keyword) || ''}|${clean(row.match_type) || ''}`;
+        const bucket = bySearchTerm.get(key) || emptyLeadBucket({
+            campaignId,
+            campaignName: campaignSpend?.campaignName || null,
+            searchTerm: term,
+            keyword: clean(row.keyword),
+            matchType: clean(row.match_type)
+        });
+        bumpLeadBucketByCount(bucket, row.status, row.unique_leads, row.event_count);
+        bySearchTerm.set(key, bucket);
     }
-    const sessionWhere = sessionConditions.length ? `WHERE ${sessionConditions.join(' AND ')}` : '';
+
+    const campaigns = Array.from(byCampaign.values())
+        .map(bucket => ({
+            ...bucket,
+            trueCpa: bucket.uniqueLeads > 0 ? bucket.spend / bucket.uniqueLeads : 0,
+            qualifiedCpa: bucket.qualifiedPipeline > 0 ? bucket.spend / bucket.qualifiedPipeline : 0,
+            convertedCpa: bucket.converted > 0 ? bucket.spend / bucket.converted : 0,
+            customerCpa: bucket.converted > 0 ? bucket.spend / bucket.converted : 0
+        }))
+        .sort((a, b) => b.spend - a.spend || b.uniqueLeads - a.uniqueLeads);
+    const recentLeads = buildLeadRows(recentResult.rows, [], { recentJourneys: [] }, spendByCampaign);
+    const offlineRow = offlineResult.rows[0] || {};
+    const qualifiedOrConverted = Number(offlineRow.qualified_or_converted || 0);
+    const readyRows = Number(offlineRow.ready_rows || 0);
+    const summary = {
+        generatedAt: new Date().toISOString(),
+        mode: 'overview',
+        dateRange,
+        scope: leadAttributionScopeSummary(scope),
+        totals,
+        byCampaign: campaigns,
+        bySearchTerm: Array.from(bySearchTerm.values()).sort((a, b) => b.uniqueLeads - a.uniqueLeads).slice(0, 100),
+        journeySummary: {
+            totalSessions: totals.uniqueLeads,
+            sessionsWithMultipleActions: recentResult.rows.filter((row: any) => Number(row.event_count || 0) > 1).length,
+            topActionOverlaps: [],
+            topPaths: [],
+            flowEdges: [],
+            pathOutcomes: [],
+            recentJourneys: []
+        },
+        recentLeads,
+        offlineExport: {
+            statuses: ['qualified', 'converted'],
+            readyRows,
+            skippedMissingClickId: Math.max(0, qualifiedOrConverted - readyRows),
+            qualifiedOrConverted,
+            needsReview: Number(offlineRow.needs_review || 0)
+        },
+        periodComparison: {
+            previousPeriod: periodMetricsFromBucket(previousPeriodBucket),
+            currentPeriod: periodMetricsFromBucket(currentPeriodBucket)
+        }
+    };
+
+    if (ttlSeconds > 0) {
+        leadAttributionOverviewCache.set(cacheKey, {
+            summary: cloneJson(summary),
+            expiresAt: now + ttlSeconds * 1000
+        });
+    }
+    return summary;
+}
+
+export async function getLeadAttributionSummary(
+    pool: Pool,
+    dashboardData: any,
+    options: LeadAttributionSummaryOptions = {}
+): Promise<any> {
+    await ensureLeadSchema(pool);
+    if ((options.mode || 'full') === 'overview') {
+        return buildLeadAttributionOverviewSummary(pool, dashboardData);
+    }
+    const dateRange = dashboardDateRange(dashboardData);
+    const scope = dashboardLeadScope(dashboardData);
+    const { where: sessionWhere, params: sessionParams } = sessionDateWhere(dateRange, scope);
     const { rows } = await pool.query(
         `SELECT session_key, session_key_type, status, status_rank, event_count, lead_ids, attribution, contact, first_seen, last_seen
          FROM lead_sessions
@@ -773,7 +1201,7 @@ export async function getLeadAttributionSummary(pool: Pool, dashboardData: any):
     const eventsResult = rows.length
         ? await pool.query(
             `SELECT session_key, kind, lead_id, session_id, status, submitted_at, received_at,
-                    gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+                    gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, ad_group_id, utm_term, utm_content,
                     keyword, match_type, name, email, phone
              FROM lead_events
              WHERE session_key = ANY($1::varchar[])
@@ -791,8 +1219,9 @@ export async function getLeadAttributionSummary(pool: Pool, dashboardData: any):
     for (const session of leadRows) {
         bumpLeadBucket(totals, session);
         const attribution = session.attribution || {};
-        const campaignId = clean(attribution.utm_campaign) || '(none)';
-        const campaignSpend = spendByCampaign.get(campaignId);
+        const rawCampaignId = clean(attribution.utm_campaign);
+        const campaignId = clean(session?.campaign?.campaignId) || rawCampaignId || '(none)';
+        const campaignSpend = spendByCampaign.get(campaignId) || (rawCampaignId ? spendByCampaign.get(rawCampaignId) : undefined);
         const campaignBucket = byCampaign.get(campaignId) || emptyLeadBucket({
             campaignId,
             campaignName: campaignSpend?.campaignName || null,
@@ -830,6 +1259,7 @@ export async function getLeadAttributionSummary(pool: Pool, dashboardData: any):
     return {
         generatedAt: new Date().toISOString(),
         dateRange,
+        scope: leadAttributionScopeSummary(scope),
         totals,
         byCampaign: campaigns,
         bySearchTerm: Array.from(bySearchTerm.values()).sort((a, b) => b.uniqueLeads - a.uniqueLeads).slice(0, 100),
@@ -838,6 +1268,165 @@ export async function getLeadAttributionSummary(pool: Pool, dashboardData: any):
         recentLeads: leadRows.slice(0, 50),
         recentSessions: rows.slice(0, 50),
         offlineExport: buildOfflineExportReadiness(leadRows)
+    };
+}
+
+function leadStatusShortLabel(value: any): string {
+    const labels: Record<LeadStatus, string> = {
+        new: 'Needs review',
+        qualified: 'Qualified',
+        converted: 'Won',
+        qualified_lost: 'Lost',
+        useless: 'Junk'
+    };
+    return labels[normalizeStatus(value)];
+}
+
+function clickIdSummary(attribution: any): string {
+    const parts = [
+        clean(attribution?.gclid) ? 'GCLID' : null,
+        clean(attribution?.gbraid) ? 'GBRAID' : null,
+        clean(attribution?.wbraid) ? 'WBRAID' : null
+    ].filter(Boolean);
+    return parts.length ? parts.join(', ') : 'No click ID';
+}
+
+function leadActionPathLabel(value: any): string {
+    const text = clean(value);
+    return text && text !== '(no action kind)' ? text : 'Lead captured';
+}
+
+export async function exportLeadReviewCsv(pool: Pool, options: {
+    startDate?: any;
+    endDate?: any;
+    campaignId?: any;
+    campaignName?: any;
+    adGroupId?: any;
+    adGroupName?: any;
+} = {}): Promise<{ csv: string; rowCount: number }> {
+    await ensureLeadSchema(pool);
+    const startDate = cleanDate(options.startDate);
+    const endDate = cleanDate(options.endDate);
+    if (options.startDate && !startDate) throw new LeadValidationError('Invalid startDate. Use YYYY-MM-DD.');
+    if (options.endDate && !endDate) throw new LeadValidationError('Invalid endDate. Use YYYY-MM-DD.');
+    if (startDate && endDate && startDate > endDate) throw new LeadValidationError('startDate must be before or equal to endDate.');
+
+    const params: any[] = [];
+    const conditions: string[] = [];
+    if (startDate) {
+        params.push(startDate);
+        conditions.push(`first_seen >= $${params.length}::date`);
+    }
+    if (endDate) {
+        params.push(endDate);
+        conditions.push(`first_seen < ($${params.length}::date + INTERVAL '1 day')`);
+    }
+    const campaignId = clean(options.campaignId);
+    if (campaignId) {
+        params.push(uniqueNonEmpty([campaignId, clean(options.campaignName)]));
+        conditions.push(`attribution->>'utm_campaign' = ANY($${params.length}::text[])`);
+    }
+    const adGroupId = clean(options.adGroupId);
+    if (adGroupId) {
+        params.push(uniqueNonEmpty([adGroupId, clean(options.adGroupName)]));
+        conditions.push(`attribution->>'ad_group_id' = ANY($${params.length}::text[])`);
+    }
+    const sessionWhere = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const { rows } = await pool.query(
+        `SELECT session_key, session_key_type, status, status_rank, event_count, lead_ids, attribution, contact, first_seen, last_seen
+         FROM lead_sessions
+         ${sessionWhere}
+         ORDER BY last_seen DESC`,
+        params
+    );
+    const eventsResult = rows.length
+        ? await pool.query(
+            `SELECT session_key, kind, lead_id, session_id, status, submitted_at, received_at,
+                    gclid, gbraid, wbraid, utm_source, utm_medium, utm_campaign, ad_group_id, utm_term, utm_content,
+                    keyword, match_type, name, email, phone
+             FROM lead_events
+             WHERE session_key = ANY($1::varchar[])
+             ORDER BY session_key ASC, COALESCE(submitted_at, received_at) ASC, received_at ASC`,
+            [rows.map((row: any) => row.session_key)]
+        )
+        : { rows: [] };
+    const journeySummary = buildLeadJourneySummary(rows, eventsResult.rows);
+    const leadRows = buildLeadRows(rows, eventsResult.rows, journeySummary, new Map());
+
+    const csvRows: string[][] = [[
+        'First Seen',
+        'First Seen IST',
+        'Last Seen',
+        'Status',
+        'Name',
+        'Email',
+        'Phone',
+        'Campaign ID',
+        'Campaign Name',
+        'Ad Group ID',
+        'Search Term',
+        'Keyword',
+        'Match Type',
+        'UTM Source',
+        'UTM Medium',
+        'UTM Campaign',
+        'UTM Term',
+        'UTM Content',
+        'Click ID Summary',
+        'GCLID',
+        'GBRAID',
+        'WBRAID',
+        'Has Click ID',
+        'Offline Upload Ready',
+        'Lead Action Path',
+        'Event Count',
+        'Unique Action Count',
+        'Session Key',
+        'Session Key Type',
+        'Lead IDs'
+    ]];
+
+    for (const lead of leadRows) {
+        const attribution = lead.attribution || {};
+        const contact = lead.contact || {};
+        const campaign = lead.campaign || {};
+        csvRows.push([
+            String(lead.firstSeen || ''),
+            String(lead.firstSeenIst || formatToIST(lead.firstSeen) || ''),
+            String(lead.lastSeen || ''),
+            leadStatusShortLabel(lead.status),
+            clean(contact.name) || '',
+            clean(contact.email) || '',
+            clean(contact.phone) || '',
+            clean(campaign.campaignId) || clean(attribution.utm_campaign) || '',
+            clean(campaign.campaignName) || '',
+            clean(attribution.ad_group_id) || '',
+            clean(attribution.utm_term) || '',
+            clean(attribution.keyword) || clean(attribution.utm_term) || '',
+            clean(attribution.match_type) || '',
+            clean(attribution.utm_source) || '',
+            clean(attribution.utm_medium) || '',
+            clean(attribution.utm_campaign) || '',
+            clean(attribution.utm_term) || '',
+            clean(attribution.utm_content) || '',
+            clickIdSummary(attribution),
+            clean(attribution.gclid) || '',
+            clean(attribution.gbraid) || '',
+            clean(attribution.wbraid) || '',
+            lead.hasClickId ? 'Yes' : 'No',
+            lead.offlineConversionReady ? 'Yes' : 'No',
+            leadActionPathLabel(lead.actionPath),
+            String(lead.eventCount ?? lead.event_count ?? ''),
+            String(lead.uniqueActionCount ?? ''),
+            clean(lead.sessionKey) || '',
+            clean(lead.sessionKeyType) || '',
+            Array.isArray(lead.leadIds) ? lead.leadIds.join(' | ') : ''
+        ]);
+    }
+
+    return {
+        csv: csvRows.map(row => row.map(csvCell).join(',')).join('\n') + '\n',
+        rowCount: csvRows.length - 1
     };
 }
 
@@ -881,6 +1470,7 @@ export interface OfflineConversionExportOptions {
     startDate?: any;
     endDate?: any;
     campaignId?: any;
+    campaignName?: any;
     currency?: string;
     qualifiedName?: string;
     convertedName?: string;
@@ -920,9 +1510,10 @@ export async function exportOfflineConversionsCsv(pool: Pool, options: OfflineCo
         conditions.push(`ls.first_seen < ($${params.length}::date + INTERVAL '1 day')`);
     }
     const campaignId = clean(options.campaignId);
-    if (campaignId) {
-        params.push(campaignId);
-        conditions.push(`ls.attribution->>'utm_campaign' = $${params.length}`);
+    const campaignValues = uniqueNonEmpty([campaignId, clean(options.campaignName)]);
+    if (campaignValues.length) {
+        params.push(campaignValues);
+        conditions.push(`ls.attribution->>'utm_campaign' = ANY($${params.length}::text[])`);
     }
 
     const { rows } = await pool.query(
@@ -1028,16 +1619,18 @@ export async function getLeadQualityMetricsForWindow(pool: Pool, input: {
     start: Date;
     end: Date;
     campaignId?: string | null;
+    campaignName?: string | null;
     searchTerm?: string | null;
 }): Promise<LeadQualityMetrics> {
     await ensureLeadSchema(pool);
     const params: any[] = [input.start.toISOString(), input.end.toISOString()];
     const conditions = ['first_seen >= $1::timestamp', 'first_seen < $2::timestamp'];
     const campaignId = clean(input.campaignId);
+    const campaignValues = uniqueNonEmpty([campaignId, clean(input.campaignName)]);
     const searchTerm = clean(input.searchTerm);
-    if (campaignId) {
-        params.push(campaignId);
-        conditions.push(`attribution->>'utm_campaign' = $${params.length}`);
+    if (campaignValues.length) {
+        params.push(campaignValues);
+        conditions.push(`attribution->>'utm_campaign' = ANY($${params.length}::text[])`);
     }
     if (searchTerm) {
         params.push(searchTerm.toLowerCase());

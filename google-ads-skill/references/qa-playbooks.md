@@ -31,17 +31,17 @@ Debate competitor pressure, conversion tracking/mix, bidding/budget/rank, and la
 
 ## Which keywords should I pause?
 
-Use candidate signals, keyword rows, configured keyword status, Quality Score, and `leadAttribution` when available. Only recommend a pause when enough spend/click volume exists or first-party evidence shows repeated useless leads with no qualified/converted leads. Otherwise create a watchlist or bid/match-type/eligibility debate. A `WASTED_SPEND` candidate may include a `verificationSpec` for future keyword status detection; adjust it if the proposal action differs.
+Use candidate signals, keyword rows, configured keyword status, Quality Score, and `leadAttribution` when available. Only recommend a pause when enough spend/click volume exists or first-party evidence shows repeated useless leads with no qualified/converted leads in the same campaign/ad-group scope. Filtered candidate-signal reads can include parent-scope account or campaign rows; inspect the signal entity before treating it as proof about the selected keyword. Otherwise create a watchlist or bid/match-type/eligibility debate. A `WASTED_SPEND` candidate may include a `verificationSpec` for future keyword status detection; adjust it if the proposal action differs.
 
 ## Which search terms should become negatives?
 
-Use search-term rows, `QUERY_MISMATCH` signals, negative coverage, configured keyword coverage, row-level `leadQuality`, and first-party UTM-term quality. Debate exact negative vs phrase/root negative. Avoid broad negatives when the root may appear in qualified traffic or when `leadAttribution` shows qualified/converted leads for that term. Do not recommend adding a negative for a term already covered by an active account, campaign, ad-group, or active shared-list negative; removed shared lists and removed shared-list campaign attachments are not active coverage. If campaign/ad-group scope is unknown, only account-level negatives prove account-wide coverage.
+Use search-term rows, `QUERY_MISMATCH` signals, negative coverage, configured keyword coverage, row-level `leadQuality`, and first-party UTM-term quality. Debate exact negative vs phrase/root negative. Avoid broad negatives when the root may appear in qualified traffic or when `leadAttribution` shows qualified/converted leads for that term in the same campaign/ad-group scope. Do not borrow useless or qualified lead quality from another campaign that happens to share the same search-term text. Do not recommend adding a negative for a term already covered by an active account, campaign, ad-group, or active shared-list negative; removed shared lists and removed shared-list campaign attachments are not active coverage. If campaign/ad-group scope is unknown, only account-level negatives prove account-wide coverage.
 
 > **Privacy caveat**: Always note that Google may hide low-volume search terms per its privacy policy. The absence of a term in the dashboard does not prove that no queries occurred for that term. Do not overstate parity with Google Ads UI, which may show rows the API omits.
 
-> **Source coverage caveat**: Empty or failed negative/configured-keyword reports do not prove the account has no negatives or configured keywords. Check `sourceCoverage.missingSources`, `staleSources`, `failedSources`, row `sourceFreshness`, and candidate `missing_data`/`missingData`.
-> A stale source is valid local data older than the dashboard stale threshold (`DASHBOARD_SOURCE_STALE_HOURS`, default 48 hours); lower confidence even when row counts look healthy.
-> A failed source can come from refresh metadata or local `data/latest/source-status.json`; a failed empty file is failed data, not a loaded empty account state.
+> **Source coverage caveat**: Empty or failed negative/configured-keyword reports do not prove the account has no negatives or configured keywords. Check `sourceCoverage.missingSources`, `staleSources`, `failedSources`, shared `decisionInputEnrichment.sourceFreshness`, and candidate `missing_data`/`missingData`.
+> A stale source has warehouse coverage or refresh metadata older than the dashboard stale threshold (`DASHBOARD_SOURCE_STALE_HOURS`, default 48 hours); lower confidence even when row counts look healthy.
+> A failed source comes from refresh-run/report-coverage metadata; a failed empty report is failed data, not a loaded empty account state.
 
 > **Read-only scope**: The dashboard has no keyword creation, negative keyword mutation, or any other account mutation controls. All search term and landing page sections are read-only reporting only.
 
@@ -71,6 +71,8 @@ Use competitor keyword spend, visible competitor search-term spend, conversion c
 5. Rank by severity, spend impact, evidence quality, source freshness, learning priors, and applicable memory context.
 6. Create only the top few proposals the user can act on.
 7. Each option needs a proposal-specific verification spec or `diagnosis_only`; candidate `verificationSpec` is a starting point only when the proposal action matches it.
+
+Use `get_proposal_context` for enabled ad-group proposal generation, not as proof that paused, removed, limited, or historical entities do not exist. For those questions, fetch `configuredKeywords`, `keywords`, `searchTerms`, `campaigns`, or `adGroups` sections, and use bounded raw GAQL when the dashboard section is capped or missing the specific entity.
 
 ## Save proposal feedback
 

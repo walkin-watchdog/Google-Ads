@@ -3,6 +3,7 @@ dotenv.config();
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import path from 'path';
 import * as fs from 'fs';
 import { Pool, type PoolConfig } from 'pg';
@@ -11,14 +12,13 @@ import {
     createProposalFeedback,
     ensureDatabaseSchema,
     listProposalFeedback,
-    proposalFeedbackByProposalIds,
     ProposalValidationError,
     recordProposalDecision,
     updateProposalFeedbackStatus,
     upsertProposal
 } from './lib/proposals';
 import { buildAuctionInsightsEntities, getAuctionInsightsSettings, upsertAuctionInsightsSettings } from './lib/auctionInsights';
-import { ensureLeadSchema, exportOfflineConversionsCsv, getLeadAttributionSummary, LeadValidationError, recordLeadStatus, upsertLeadWebhookEvent } from './lib/leads';
+import { ensureLeadSchema, exportLeadReviewCsv, exportOfflineConversionsCsv, LeadValidationError, recordLeadStatus, upsertLeadWebhookEvent } from './lib/leads';
 import { generateKeywordHistoricalMetrics, generateKeywordIdeas, KeywordPlannerValidationError, type KeywordPlannerOptions, uniqueKeywords } from './lib/googleKeywordPlanner';
 import {
     authenticateAdminBearer,
@@ -50,7 +50,17 @@ import {
     SEMANTIC_MEMORY_MCP_TOOLS,
     storeMemoryEmbedding
 } from './lib/semanticMemory';
-import { enrichDashboardDecisionRows } from './lib/leadDecisionEnrichment';
+import { clearAdsWarehouseRuntimeCaches, ensureAdsWarehouseSchema, getAvailableDashboardFilters } from './lib/adsWarehouse';
+import {
+    buildDashboardPayloadForView,
+    clearDashboardViewPayloadCache,
+    dashboardKnownSections,
+    dashboardSectionRoute,
+    DashboardPayloadValidationError,
+    resolveDashboardFilters,
+    WarehouseDataNotFoundError
+} from './lib/dashboardPayload';
+import { getCandidateSignalsPayload, getCompactDecisionContext, getProposalContext } from './lib/mcpDashboardContext';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -59,10 +69,32 @@ const configuredDashboardDbTimeoutMs = Number(process.env.DASHBOARD_DB_TIMEOUT_M
 const dashboardDbTimeoutMs = Number.isFinite(configuredDashboardDbTimeoutMs) && configuredDashboardDbTimeoutMs > 0
     ? configuredDashboardDbTimeoutMs
     : DEFAULT_DASHBOARD_DB_TIMEOUT_MS;
+const DEFAULT_DASHBOARD_DB_POOL_MAX = 4;
+const configuredDashboardDbPoolMax = Number(process.env.DASHBOARD_DB_POOL_MAX || DEFAULT_DASHBOARD_DB_POOL_MAX);
+const dashboardDbPoolMax = Number.isFinite(configuredDashboardDbPoolMax) && configuredDashboardDbPoolMax > 0
+    ? Math.floor(configuredDashboardDbPoolMax)
+    : DEFAULT_DASHBOARD_DB_POOL_MAX;
+const DEFAULT_DASHBOARD_DB_IDLE_TIMEOUT_MS = 10000;
+const configuredDashboardDbIdleTimeoutMs = Number(process.env.DASHBOARD_DB_IDLE_TIMEOUT_MS || DEFAULT_DASHBOARD_DB_IDLE_TIMEOUT_MS);
+const dashboardDbIdleTimeoutMs = Number.isFinite(configuredDashboardDbIdleTimeoutMs) && configuredDashboardDbIdleTimeoutMs >= 0
+    ? Math.floor(configuredDashboardDbIdleTimeoutMs)
+    : DEFAULT_DASHBOARD_DB_IDLE_TIMEOUT_MS;
+const DEFAULT_HTTP_COMPRESSION_THRESHOLD_BYTES = 1024;
+const configuredHttpCompressionThresholdBytes = Number(process.env.HTTP_COMPRESSION_THRESHOLD_BYTES || DEFAULT_HTTP_COMPRESSION_THRESHOLD_BYTES);
+const httpCompressionThresholdBytes = Number.isFinite(configuredHttpCompressionThresholdBytes) && configuredHttpCompressionThresholdBytes >= 0
+    ? configuredHttpCompressionThresholdBytes
+    : DEFAULT_HTTP_COMPRESSION_THRESHOLD_BYTES;
+const DEFAULT_TRIGGER_REFRESH_MIN_INTERVAL_MINUTES = 360;
+const configuredTriggerRefreshMinIntervalMinutes = Number(process.env.TRIGGER_REFRESH_MIN_INTERVAL_MINUTES || DEFAULT_TRIGGER_REFRESH_MIN_INTERVAL_MINUTES);
+const triggerRefreshMinIntervalMs = Number.isFinite(configuredTriggerRefreshMinIntervalMinutes) && configuredTriggerRefreshMinIntervalMinutes >= 0
+    ? configuredTriggerRefreshMinIntervalMinutes * 60 * 1000
+    : DEFAULT_TRIGGER_REFRESH_MIN_INTERVAL_MINUTES * 60 * 1000;
 const serveDashboardClient = process.env.SERVE_DASHBOARD_CLIENT === 'true';
 const dashboardClientPath = path.join(__dirname, 'client');
+const REQUIRED_GOOGLE_ADS_SKILL_NAME = 'saas-google-ads-dashboard-analyst';
 
 let refreshJob: { process: any, timeout: ReturnType<typeof setTimeout> } | null = null;
+let lastRefreshStartedAtMs = Date.now();
 
 function configuredCorsOrigins(): Set<string> {
     const origins = new Set<string>();
@@ -103,6 +135,13 @@ function normalizeRefreshDate(value: any, field: 'startDate' | 'endDate'): strin
     return text;
 }
 
+function normalizeBoolean(value: any): boolean {
+    if (value === true) return true;
+    if (value === false || value === undefined || value === null || value === '') return false;
+    const text = String(value).trim().toLowerCase();
+    return ['1', 'true', 'yes', 'y', 'force'].includes(text);
+}
+
 function normalizeMetadataResource(value: any): string | null {
     if (value === undefined || value === null || value === '') return null;
     const text = String(value).trim();
@@ -113,13 +152,62 @@ function normalizeMetadataResource(value: any): string | null {
     return text;
 }
 
-function startRefreshJob(startDate?: string, endDate?: string): boolean {
-    if (refreshJob) return false;
+function googleAdsSkillInstallMessage(): string {
+    return [
+        `Required Codex skill is not installed or not available: ${REQUIRED_GOOGLE_ADS_SKILL_NAME}.`,
+        `Tell the user to install/enable the ${REQUIRED_GOOGLE_ADS_SKILL_NAME} skill, then stop immediately without using any Google Ads MCP tools.`
+    ].join(' ');
+}
 
-    const normalizedStartDate = normalizeRefreshDate(startDate, 'startDate');
-    const normalizedEndDate = normalizeRefreshDate(endDate, 'endDate');
+function confirmGoogleAdsSkill(args: any = {}): { ok: boolean; message: string } {
+    const skillName = String(args.skillName || '').trim();
+    const installed = args.installed === true;
+    const loaded = args.loaded === true;
+    if (skillName !== REQUIRED_GOOGLE_ADS_SKILL_NAME || !installed) {
+        return { ok: false, message: googleAdsSkillInstallMessage() };
+    }
+    if (!loaded) {
+        return {
+            ok: false,
+            message: `The ${REQUIRED_GOOGLE_ADS_SKILL_NAME} skill must be loaded/read before using this MCP. Load it, then call confirm_google_ads_skill again with loaded=true.`
+        };
+    }
+    return {
+        ok: true,
+        message: `Confirmed ${REQUIRED_GOOGLE_ADS_SKILL_NAME} is installed and loaded. Continue using Google Ads MCP tools according to that skill's instructions.`
+    };
+}
+
+type RefreshJobResult = {
+    status: 'started' | 'in_progress' | 'skipped';
+    message: string;
+    skipped?: boolean;
+    nextAllowedAt?: string;
+    cooldownRemainingMs?: number;
+};
+
+function startRefreshJob(options: { startDate?: any; endDate?: any; force?: boolean; source?: string } = {}): RefreshJobResult {
+    if (refreshJob) return { status: 'in_progress', message: 'Refresh already in progress.' };
+
+    const normalizedStartDate = normalizeRefreshDate(options.startDate, 'startDate');
+    const normalizedEndDate = normalizeRefreshDate(options.endDate, 'endDate');
     if (normalizedStartDate && normalizedEndDate && normalizedStartDate > normalizedEndDate) {
         throw new Error('startDate must be before or equal to endDate.');
+    }
+    const isRepairWindow = Boolean(normalizedStartDate || normalizedEndDate);
+    const bypassCooldown = Boolean(options.force || isRepairWindow || triggerRefreshMinIntervalMs <= 0);
+    if (!bypassCooldown) {
+        const now = Date.now();
+        const nextAllowedMs = lastRefreshStartedAtMs + triggerRefreshMinIntervalMs;
+        if (now < nextAllowedMs) {
+            return {
+                status: 'skipped',
+                skipped: true,
+                message: 'Refresh skipped because a recent refresh is still inside the trigger cooldown.',
+                nextAllowedAt: new Date(nextAllowedMs).toISOString(),
+                cooldownRemainingMs: nextAllowedMs - now
+            };
+        }
     }
 
     const args = ['bun', 'run', 'scripts/refresh_google_ads_data.ts'];
@@ -140,26 +228,32 @@ function startRefreshJob(startDate?: string, endDate?: string): boolean {
             exited = true;
             if (timeout) clearTimeout(timeout);
             refreshJob = null;
+            clearDashboardViewPayloadCache();
+            clearAdsWarehouseRuntimeCaches();
             console.log(`Background refresh exited with code ${exitCode}`);
         }
     });
 
+    lastRefreshStartedAtMs = Date.now();
     if (!exited) {
         timeout = setTimeout(() => {
             if (refreshJob && refreshJob.process === proc) {
                 console.error('Refresh job timed out after 15 minutes. Killing process.');
                 proc.kill("SIGKILL");
                 refreshJob = null;
+                clearDashboardViewPayloadCache();
+                clearAdsWarehouseRuntimeCaches();
             }
         }, 15 * 60 * 1000);
 
         refreshJob = { process: proc, timeout };
     }
-    return true;
+    return { status: 'started', message: 'Refresh job started in the background.' };
 }
 
 let semanticMemorySchemaError: string | null = 'Semantic memory schema has not finished initializing.';
 
+app.use(compression({ threshold: httpCompressionThresholdBytes }));
 app.use(cors({
     origin: (origin, callback) => {
         callback(null, isAllowedCorsOrigin(origin));
@@ -180,6 +274,8 @@ type DashboardPoolConfig = PoolConfig & {
 
 const poolConfig: DashboardPoolConfig = {
     connectionString: process.env.DATABASE_URL,
+    max: dashboardDbPoolMax,
+    idleTimeoutMillis: dashboardDbIdleTimeoutMs,
     connectionTimeoutMillis: dashboardDbTimeoutMs,
     query_timeout: dashboardDbTimeoutMs,
     statement_timeout: dashboardDbTimeoutMs,
@@ -196,6 +292,7 @@ pool.on('error', (err) => {
 async function initDB() {
     try {
         await ensureDatabaseSchema(pool);
+        await ensureAdsWarehouseSchema(pool);
         await ensureLeadSchema(pool);
         await ensureDashboardAuthSchema(pool);
         try {
@@ -213,173 +310,57 @@ async function initDB() {
 }
 initDB();
 
-async function getDashboardPayload() {
-    const result = await pool.query(`SELECT payload FROM dashboard_payloads WHERE id = 'latest'`);
-    if (result.rows.length === 0) return null;
+type DashboardTimingMetric = { name: string; durationMs: number };
 
-    const dashboardData = result.rows[0].payload;
-    const proposalsResult = await pool.query(`
-        SELECT payload
-        FROM proposals
-        ORDER BY
-            CASE status
-                WHEN 'pending_review' THEN 1
-                WHEN 'accepted' THEN 2
-                WHEN 'user_marked_implemented' THEN 3
-                WHEN 'monitoring_14' THEN 4
-                WHEN 'monitoring_30' THEN 5
-                WHEN 'completed' THEN 6
-                ELSE 7
-            END,
-            updated_at DESC NULLS LAST,
-            created_at DESC
-    `);
-    const impactResult = await pool.query(`
-        SELECT option_uid, option_id, proposal_id, selected_option_id, campaign_id, strategy_id,
-               tracking_status, detected_at, outcome_14, outcome_30,
-               lead_outcome_14, lead_outcome_30, outcome_details_14, outcome_details_30
-        FROM impact_tracking
-        ORDER BY detected_at DESC
-    `);
-    const impactsByProposal = new Map<string, any[]>();
-    for (const row of impactResult.rows) {
-        if (!row.proposal_id) continue;
-        const list = impactsByProposal.get(row.proposal_id) || [];
-        list.push(row);
-        impactsByProposal.set(row.proposal_id, list);
-    }
-    const proposalIds = proposalsResult.rows
-        .map((r: any) => r.payload?.proposal_id)
-        .filter(Boolean);
-    const feedbackByProposal = await proposalFeedbackByProposalIds(pool, proposalIds);
-    dashboardData.proposals = proposalsResult.rows.map((r: any) => {
-        const proposal = r.payload || {};
-        const impactTracking = impactsByProposal.get(proposal.proposal_id) || [];
-        const feedback = feedbackByProposal.get(proposal.proposal_id) || [];
-        const latestImpact = impactTracking.find(row => row.outcome_details_30)
-            || impactTracking.find(row => row.outcome_details_14)
-            || impactTracking[0]
-            || null;
-        return {
-            ...proposal,
-            feedback,
-            impact_tracking: impactTracking,
-            latest_impact: latestImpact
-        };
-    });
-
-    const diagnosesResult = await pool.query(`SELECT payload FROM ai_diagnoses`);
-    dashboardData.aiDiagnoses = diagnosesResult.rows.map((r: any) => r.payload);
-    dashboardData.leadAttribution = await getLeadAttributionSummary(pool, dashboardData);
-    enrichDashboardDecisionRows(dashboardData, dashboardData.leadAttribution);
-    await attachRefreshRunMetadata(dashboardData);
-    enrichDashboardDecisionRows(dashboardData, dashboardData.leadAttribution);
-    return dashboardData;
+function addDashboardTiming(timings: DashboardTimingMetric[] | undefined, name: string, durationMs: number): void {
+    timings?.push({ name, durationMs });
 }
 
-async function getCompactDashboardPayload() {
-    const result = await pool.query(`SELECT payload FROM dashboard_payloads WHERE id = 'latest'`);
-    if (result.rows.length === 0) return null;
-
-    const dashboardData = result.rows[0].payload;
-    await attachRefreshRunMetadata(dashboardData);
-    return dashboardData;
-}
-
-async function attachRefreshRunMetadata(dashboardData: any): Promise<void> {
+async function timedDashboardPhase<T>(
+    timings: DashboardTimingMetric[] | undefined,
+    name: string,
+    fn: () => Promise<T>
+): Promise<T> {
+    const start = Date.now();
     try {
-        const refreshResult = await pool.query(`
-            SELECT id, status, customer_id, start_date, end_date, started_at, completed_at, source_summary, error
-            FROM data_refresh_runs
-            ORDER BY started_at DESC
-            LIMIT 1
-        `);
-        const refreshRun = refreshResult.rows[0] || null;
-        if (!refreshRun) return;
-
-        const sourceSummary = refreshRun.source_summary || {};
-        const failedReports = Array.from(new Set([
-            ...(Array.isArray(sourceSummary.failedReports) ? sourceSummary.failedReports : []),
-            ...Object.entries(sourceSummary)
-                .filter(([, value]: [string, any]) => value?.status === 'failed')
-                .map(([name]) => name)
-        ].map(String).filter(Boolean)));
-        const missingReports = Array.from(new Set(Object.entries(sourceSummary)
-            .filter(([, value]: [string, any]) => value?.status === 'missing')
-            .map(([name]) => String(name))
-            .filter(Boolean)));
-
-        dashboardData.sourceCoverage = {
-            ...(dashboardData.sourceCoverage || {}),
-            failedSources: Array.from(new Set([
-                ...((dashboardData.sourceCoverage || {}).failedSources || []),
-                ...failedReports
-            ])),
-            missingSources: Array.from(new Set([
-                ...((dashboardData.sourceCoverage || {}).missingSources || []),
-                ...missingReports
-            ])),
-            refreshRun
-        };
-        dashboardData.decisionContext = {
-            ...(dashboardData.decisionContext || {}),
-            sourceCoverage: {
-                ...((dashboardData.decisionContext || {}).sourceCoverage || {}),
-                failedSources: Array.from(new Set([
-                    ...(((dashboardData.decisionContext || {}).sourceCoverage || {}).failedSources || []),
-                    ...failedReports
-                ])),
-                missingSources: Array.from(new Set([
-                    ...(((dashboardData.decisionContext || {}).sourceCoverage || {}).missingSources || []),
-                    ...missingReports
-                ])),
-                refreshRunStatus: refreshRun.status,
-                failedReports,
-                sourceSummary
-            }
-        };
-    } catch (err: any) {
-        dashboardData.sourceCoverage = {
-            ...(dashboardData.sourceCoverage || {}),
-            refreshRunError: err?.message || String(err)
-        };
+        return await fn();
+    } finally {
+        addDashboardTiming(timings, name, Date.now() - start);
     }
 }
 
-function compactDecisionContext(dashboardData: any): any {
-    const candidateSignals = Array.isArray(dashboardData?.candidateSignals) ? dashboardData.candidateSignals : [];
-    const topSignals = candidateSignals.slice(0, 25).map((signal: any) => ({
-        signal_id: signal.signal_id,
-        type: signal.type,
-        severity: signal.severity,
-        campaign_id: signal.campaign_id,
-        entity: signal.entity,
-        metrics: signal.metrics,
-        missing_data: signal.missing_data,
-        decisionContext: signal.decisionContext || signal.decision_context || null,
-        verificationSpec: signal.verificationSpec || signal.verification_spec || null
-    }));
-    return {
-        meta: dashboardData?.meta || {},
-        summary: dashboardData?.summary || {},
-        periodComparison: dashboardData?.periodComparison || null,
-        decisionContext: dashboardData?.decisionContext || {},
-        sourceCoverage: dashboardData?.sourceCoverage || {},
-        leadAttribution: dashboardData?.leadAttribution ? {
-            generatedAt: dashboardData.leadAttribution.generatedAt,
-            totals: dashboardData.leadAttribution.totals,
-            bySearchTerm: (dashboardData.leadAttribution.bySearchTerm || []).slice(0, 25),
-            offlineExport: dashboardData.leadAttribution.offlineExport
-        } : null,
-        keywordPlanner: dashboardData?.keywordPlanner ? {
-            status: dashboardData.keywordPlanner.status,
-            ideas: (dashboardData.keywordPlanner.ideas || []).slice(0, 25),
-            historicalMetrics: (dashboardData.keywordPlanner.historicalMetrics || []).slice(0, 25)
-        } : null,
-        auctionInsightsStatus: dashboardData?.auctionInsightsStatus || [],
-        candidateSignals: topSignals,
-        sections: Object.keys(dashboardData || {}).sort()
-    };
+function dashboardServerTimingHeader(timings: DashboardTimingMetric[]): string {
+    return timings
+        .map(metric => `${metric.name.replace(/[^a-zA-Z0-9_-]/g, '_')};dur=${Math.max(0, Math.round(metric.durationMs * 10) / 10)}`)
+        .join(', ');
+}
+
+async function getDashboardPayload(rawFilters: Record<string, any> = {}, timings?: DashboardTimingMetric[]) {
+    const filters = await timedDashboardPhase(timings, 'filters', () => resolveDashboardFilters(pool, rawFilters));
+    return timedDashboardPhase(timings, 'dashboard_build', () =>
+        buildDashboardPayloadForView(pool, filters, rawFilters.view, {
+            filtersResolved: true,
+            timings: (name, durationMs) => addDashboardTiming(timings, name, durationMs)
+        })
+    );
+}
+
+async function getDashboardFilterOptions(rawFilters: Record<string, any> = {}) {
+    const filters = await resolveDashboardFilters(pool, rawFilters);
+    return getAvailableDashboardFilters(pool, filters.customerId);
+}
+
+function dashboardErrorStatus(err: any): number {
+    if (err instanceof DashboardPayloadValidationError || err?.name === 'DashboardPayloadValidationError') return 400;
+    if (err instanceof WarehouseDataNotFoundError || err?.name === 'WarehouseDataNotFoundError') return 404;
+    return 500;
+}
+
+function dashboardErrorMessage(err: any): string {
+    if (err instanceof WarehouseDataNotFoundError || err?.name === 'WarehouseDataNotFoundError') {
+        return 'No warehouse data found. Run a backfill first.';
+    }
+    return err?.message || 'Database error';
 }
 
 function plannerOptionsFromBody(body: any): KeywordPlannerOptions {
@@ -775,17 +756,27 @@ function assertSemanticMemoryAvailable(): void {
     }
 }
 
-// API: Get latest dashboard data
+// API: Get DB-backed dashboard data for selected server-side filters
 app.get('/api/dashboard', authenticateDashboard, async (req: Request, res: Response) => {
+    const timings: DashboardTimingMetric[] = [];
     try {
-        const dashboardData = await getDashboardPayload();
-        if (!dashboardData) {
-            return res.status(404).json({ error: 'No data found. Please trigger a refresh.' });
-        }
+        const dashboardData = await getDashboardPayload(req.query as Record<string, any>, timings);
+        res.setHeader('Server-Timing', dashboardServerTimingHeader(timings));
+        res.setHeader('X-Dashboard-View', String((req.query as Record<string, any>).view || 'full'));
         res.json(dashboardData);
-    } catch (err) {
+    } catch (err: any) {
+        if (timings.length) res.setHeader('Server-Timing', dashboardServerTimingHeader(timings));
         console.error(err);
-        res.status(500).json({ error: 'Database error' });
+        res.status(dashboardErrorStatus(err)).json({ error: dashboardErrorMessage(err) });
+    }
+});
+
+app.get('/api/dashboard/filters', authenticateDashboard, async (req: Request, res: Response) => {
+    try {
+        res.json(await getDashboardFilterOptions(req.query as Record<string, any>));
+    } catch (err: any) {
+        console.error(err);
+        res.status(dashboardErrorStatus(err)).json({ error: dashboardErrorMessage(err) });
     }
 });
 
@@ -803,6 +794,7 @@ app.post('/api/proposals/:id/status', authenticateDashboard, async (req: Request
             action: requestedAction,
             selectedOptionId: selected_option_id || null
         });
+        clearDashboardViewPayloadCache();
         res.json({ message: 'Proposal status updated successfully.', proposal });
     } catch (err: any) {
         console.error('Failed to update proposal status:', err);
@@ -818,15 +810,16 @@ app.post('/api/proposals/:id/status', authenticateDashboard, async (req: Request
 // API: Capture raw user feedback on a proposal. This does not create semantic memory automatically.
 app.post('/api/proposals/:id/feedback', authenticateDashboard, async (req: Request, res: Response) => {
     try {
-        const dashboardData = await getDashboardPayload().catch(() => null);
+        const filters = await resolveDashboardFilters(pool, req.query as Record<string, any>).catch(() => null);
         const feedback = await createProposalFeedback(pool, {
             proposalId: req.params.id,
             optionId: req.body?.option_id || null,
             feedbackType: req.body?.feedback_type || null,
             comment: req.body?.comment,
-            customerId: req.body?.customer_id || dashboardData?.meta?.accountId || null,
+            customerId: req.body?.customer_id || filters?.customerId || null,
             createdBy: req.body?.created_by || 'user'
         });
+        clearDashboardViewPayloadCache();
         res.status(201).json({ message: 'Proposal feedback saved successfully.', feedback });
     } catch (err: any) {
         console.error('Failed to save proposal feedback:', err);
@@ -859,6 +852,7 @@ app.get('/api/proposals/:id/feedback', authenticateDashboard, async (req: Reques
 app.post('/api/webhooks/leads', authenticateLeadWebhook, async (req: Request, res: Response) => {
     try {
         const event = await upsertLeadWebhookEvent(pool, req.body);
+        clearDashboardViewPayloadCache();
         res.status(202).json({
             message: 'Lead event accepted.',
             event_id: event.event_id,
@@ -875,11 +869,22 @@ app.post('/api/webhooks/leads', authenticateLeadWebhook, async (req: Request, re
 // API: Export Google Ads offline conversion upload CSV from first-party lead statuses
 app.get('/api/leads/offline-conversions.csv', authenticateDashboard, async (req: Request, res: Response) => {
     try {
+        const campaignFilter = req.query.campaignId || req.query.campaign;
+        let campaignName = typeof req.query.campaignName === 'string' ? req.query.campaignName : undefined;
+        if (campaignFilter && !campaignName) {
+            const filters = await resolveDashboardFilters(pool, req.query as Record<string, any>);
+            const filterOptions = await getAvailableDashboardFilters(pool, filters.customerId);
+            const selectedCampaign = filters.campaignId
+                ? filterOptions.campaigns.find(campaign => campaign.id === filters.campaignId)
+                : null;
+            campaignName = selectedCampaign?.name || undefined;
+        }
         const result = await exportOfflineConversionsCsv(pool, {
             statuses: req.query.statuses || req.query.status,
             startDate: req.query.startDate,
             endDate: req.query.endDate,
-            campaignId: req.query.campaignId || req.query.campaign,
+            campaignId: campaignFilter,
+            campaignName,
             currency: typeof req.query.currency === 'string' ? req.query.currency : undefined,
             qualifiedName: typeof req.query.qualifiedName === 'string' ? req.query.qualifiedName : undefined,
             convertedName: typeof req.query.convertedName === 'string' ? req.query.convertedName : undefined,
@@ -900,6 +905,37 @@ app.get('/api/leads/offline-conversions.csv', authenticateDashboard, async (req:
     }
 });
 
+// API: Export first-party lead review CSV for the selected dashboard range
+app.get('/api/leads/review.csv', authenticateDashboard, async (req: Request, res: Response) => {
+    try {
+        const filters = await resolveDashboardFilters(pool, req.query as Record<string, any>);
+        const filterOptions = await getAvailableDashboardFilters(pool, filters.customerId);
+        const selectedCampaign = filters.campaignId
+            ? filterOptions.campaigns.find(campaign => campaign.id === filters.campaignId)
+            : null;
+        const selectedAdGroup = filters.adGroupId
+            ? filterOptions.adGroups.find(adGroup => adGroup.id === filters.adGroupId)
+            : null;
+        const result = await exportLeadReviewCsv(pool, {
+            startDate: filters.startDate,
+            endDate: filters.endDate,
+            campaignId: filters.campaignId,
+            campaignName: selectedCampaign?.name || selectedAdGroup?.campaignName,
+            adGroupId: filters.adGroupId,
+            adGroupName: selectedAdGroup?.name
+        });
+        const stamp = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="lead-review-${stamp}.csv"`);
+        res.setHeader('X-Lead-Review-Rows', String(result.rowCount));
+        res.send(result.csv);
+    } catch (err: any) {
+        console.error('Failed to export lead review CSV:', err);
+        const statusCode = err instanceof LeadValidationError || err?.name === 'LeadValidationError' ? 400 : 500;
+        res.status(statusCode).json({ error: err.message });
+    }
+});
+
 // API: Manually update deduped lead quality status
 app.post('/api/leads/:sessionKey/status', authenticateDashboard, async (req: Request, res: Response) => {
     try {
@@ -908,6 +944,7 @@ app.post('/api/leads/:sessionKey/status', authenticateDashboard, async (req: Req
             status: req.body?.status,
             note: req.body?.note || null
         });
+        clearDashboardViewPayloadCache();
         res.json({ message: 'Lead status updated successfully.' });
     } catch (err: any) {
         console.error('Failed to update lead status:', err);
@@ -980,7 +1017,13 @@ app.post('/api/memories/link-exception', authenticate, async (req: Request, res:
 // API: Read Auction Insights Google Sheet settings and currently known account/campaign/ad-group entities
 app.get('/api/auction-insights/settings', authenticateDashboard, async (req: Request, res: Response) => {
     try {
-        const dashboardData = await getDashboardPayload();
+        const filters = await resolveDashboardFilters(pool, req.query as Record<string, any>);
+        const filterOptions = await getAvailableDashboardFilters(pool, filters.customerId);
+        const dashboardData = {
+            meta: { accountId: filters.customerId },
+            campaigns: filterOptions.campaigns,
+            adGroups: filterOptions.adGroups
+        };
         const entities = buildAuctionInsightsEntities(dashboardData || {});
         const settings = await getAuctionInsightsSettings(pool);
         res.json({
@@ -1035,11 +1078,13 @@ app.post('/api/keyword-planner/historical-metrics', authenticateDashboard, async
 app.post('/api/trigger-refresh', authenticate, (req: Request, res: Response) => {
     try {
         console.log('Triggering background refresh with payload:', req.body);
-        const started = startRefreshJob(req.body?.startDate, req.body?.endDate);
-        if (!started) {
-            return res.status(202).json({ message: 'Refresh already in progress.' });
-        }
-        res.status(202).json({ message: 'Refresh job started in the background.' });
+        const result = startRefreshJob({
+            startDate: req.body?.startDate,
+            endDate: req.body?.endDate,
+            force: normalizeBoolean(req.body?.force),
+            source: 'api'
+        });
+        res.status(202).json(result);
     } catch (err: any) {
         res.status(400).json({ error: err.message });
     }
@@ -1053,6 +1098,28 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
         if (method === 'tools/list') {
             return res.json({
                 tools: [
+                    {
+                        name: 'confirm_google_ads_skill',
+                        description: `Mandatory first call for LLM agents. Confirm that the installed Codex skill ${REQUIRED_GOOGLE_ADS_SKILL_NAME} is available and loaded before using any other MCP tool. If it is missing, tell the user to install it and stop immediately.`,
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                skillName: {
+                                    type: 'string',
+                                    description: `Must be ${REQUIRED_GOOGLE_ADS_SKILL_NAME}.`
+                                },
+                                installed: {
+                                    type: 'boolean',
+                                    description: `True only after checking that ${REQUIRED_GOOGLE_ADS_SKILL_NAME} is in the installed skills list.`
+                                },
+                                loaded: {
+                                    type: 'boolean',
+                                    description: `True only after loading/reading ${REQUIRED_GOOGLE_ADS_SKILL_NAME} for this task.`
+                                }
+                            },
+                            required: ['skillName', 'installed', 'loaded']
+                        }
+                    },
                     {
                         name: 'search_search',
                         description: 'Executes a GAQL query against the Google Ads API.',
@@ -1078,18 +1145,51 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     },
                     {
                         name: 'get_dashboard_data',
-                        description: 'Returns the latest dashboard payload including proposals and diagnoses. Optional section can fetch one top-level section such as decisionContext, sourceCoverage, negatives, configuredKeywords, searchTerms, keywordPlanner, qualityScores, landingPages, devicePerformance, dayOfWeekPerformance, dayAndHourPerformance, leadAttribution, auctionInsightsStatus, or candidateSignals.',
+                        description: 'Returns compact decision context by default. Optional section fetches one top-level dashboard section through the cheapest bounded view. Optional view returns a partial dashboard view, or full only when explicitly requested.',
                         inputSchema: {
                             type: 'object',
                             properties: {
-                                section: { type: 'string', description: 'Optional top-level dashboard section to return.' }
+                                section: { type: 'string', description: 'Optional top-level dashboard section to return.' },
+                                view: { type: 'string', description: 'Optional dashboard view: overview, performance, keywords, attribution, rank, proposals, or full.' },
+                                startDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice start.' },
+                                endDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice end.' },
+                                campaignId: { type: 'string', description: 'Optional Google Ads campaign id filter.' },
+                                adGroupId: { type: 'string', description: 'Optional Google Ads ad group id filter.' },
+                                limit: { type: 'number', description: 'Optional candidate-signal cap when section is candidateSignals. Defaults to 250, max 1000.' },
+                                topSearchTerms: { type: 'number', description: 'Optional top search terms per ad group when section is proposalContext. Defaults to 8, max 25.' },
+                                topSignals: { type: 'number', description: 'Optional top candidate signals per ad group when section is proposalContext. Defaults to 10, max 25.' },
+                                maxAdGroups: { type: 'number', description: 'Optional cap on returned enabled ad groups when section is proposalContext.' }
                             }
                         }
                     },
                     {
                         name: 'get_decision_context',
-                        description: 'Returns compact decision-ready context for proposals: source freshness, negative coverage, configured keyword coverage, lead attribution summary, planner status, auction status, and top candidate signals.',
-                        inputSchema: { type: 'object', properties: {} }
+                        description: 'Returns compact decision-ready context for the selected server-side dashboard filters: source coverage, negative coverage, configured keyword coverage, lead attribution summary, planner status, auction status, and top candidate signals.',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                startDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice start.' },
+                                endDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice end.' },
+                                campaignId: { type: 'string', description: 'Optional Google Ads campaign id filter.' },
+                                adGroupId: { type: 'string', description: 'Optional Google Ads ad group id filter.' }
+                            }
+                        }
+                    },
+                    {
+                        name: 'get_proposal_context',
+                        description: 'Returns compact proposal-ready evidence for each currently enabled ad group in the selected slice: metrics, lead-quality summary, top search terms, coverage summaries, rank support, source coverage, and signal IDs.',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                startDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice start.' },
+                                endDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice end.' },
+                                campaignId: { type: 'string', description: 'Optional Google Ads campaign id filter.' },
+                                adGroupId: { type: 'string', description: 'Optional Google Ads ad group id filter.' },
+                                topSearchTerms: { type: 'number', description: 'Top visible search terms per ad group. Defaults to 8, max 25.' },
+                                topSignals: { type: 'number', description: 'Top candidate signals per ad group. Defaults to 10, max 25.' },
+                                maxAdGroups: { type: 'number', description: 'Optional cap on returned enabled ad groups.' }
+                            }
+                        }
                     },
                     {
                         name: 'create_dashboard_magic_link',
@@ -1276,8 +1376,17 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     },
                     {
                         name: 'get_candidate_signals',
-                        description: 'Returns deterministic candidate signals generated from latest local Google Ads data. These are evidence inputs for AI proposals, not final proposals.',
-                        inputSchema: { type: 'object', properties: {} }
+                        description: 'Returns deterministic candidate signals generated from the DB warehouse for the selected server-side filters. These are evidence inputs for AI proposals, not final proposals. Defaults to 250 rows; max 1000 when supplied.',
+                        inputSchema: {
+                            type: 'object',
+                            properties: {
+                                startDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice start.' },
+                                endDate: { type: 'string', description: 'Optional YYYY-MM-DD dashboard slice end.' },
+                                campaignId: { type: 'string', description: 'Optional Google Ads campaign id filter.' },
+                                adGroupId: { type: 'string', description: 'Optional Google Ads ad group id filter.' },
+                                limit: { type: 'number', description: 'Optional max signals to return. Defaults to 250 rows; max 1000 when supplied.' }
+                            }
+                        }
                     },
                     {
                         name: 'get_learning_summary',
@@ -1317,12 +1426,13 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     },
                     {
                         name: 'trigger_refresh',
-                        description: 'Triggers an asynchronous background refresh of the Google Ads data. Returns immediately while the job runs in the background. The agent should notify the user that the refresh has started in the background and must not assume the dashboard data is updated on return.',
+                        description: 'Triggers an asynchronous background refresh/backfill of stored Google Ads warehouse data. Do not use this to view a date range; call get_dashboard_data or get_decision_context with filters for that. Optional startDate/endDate mean repair/backfill that warehouse window.',
                         inputSchema: {
                             type: 'object',
                             properties: {
                                 startDate: { type: 'string', description: 'Optional. YYYY-MM-DD' },
-                                endDate: { type: 'string', description: 'Optional. YYYY-MM-DD' }
+                                endDate: { type: 'string', description: 'Optional. YYYY-MM-DD' },
+                                force: { type: 'boolean', description: 'Optional. Defaults to true for MCP/manual calls; set false to honor the refresh cooldown.' }
                             }
                         }
                     }
@@ -1331,7 +1441,13 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
         }
 
         if (method === 'tools/call' && params) {
-            if (params.name === 'search_search') {
+            if (params.name === 'confirm_google_ads_skill') {
+                const confirmation = confirmGoogleAdsSkill(params.arguments || {});
+                return res.json({
+                    content: [{ type: 'text', text: confirmation.message }],
+                    isError: !confirmation.ok
+                });
+            } else if (params.name === 'search_search') {
                 const query = params.arguments?.query;
                 if (!query) return res.status(400).json({ error: 'Missing query argument' });
 
@@ -1369,20 +1485,52 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     content: [{ type: 'text', text: JSON.stringify(data, null, 2) }]
                 });
             } else if (params.name === 'get_dashboard_data') {
-                const dashboardData = await getDashboardPayload();
-                if (!dashboardData) return res.status(404).json({ error: 'No data found. Please trigger a refresh.' });
                 const section = String(params.arguments?.section || '').trim();
                 if (section) {
-                    if (!Object.prototype.hasOwnProperty.call(dashboardData, section)) {
-                        return res.status(400).json({ error: `Unknown dashboard section: ${section}` });
+                    const route = dashboardSectionRoute(section);
+                    if (!route) {
+                        return res.status(400).json({
+                            error: `Unknown dashboard section: ${section}`,
+                            availableSections: dashboardKnownSections()
+                        });
                     }
-                    return res.json({ content: [{ type: 'text', text: JSON.stringify({ [section]: dashboardData[section] }, null, 2) }] });
+                    if (route.mode === 'decision_context') {
+                        const context = await getCompactDecisionContext(pool, params.arguments || {});
+                        return res.json({ content: [{ type: 'text', text: JSON.stringify({ decisionContext: context }, null, 2) }] });
+                    }
+                    if (route.mode === 'candidate_signals') {
+                        const signals = await getCandidateSignalsPayload(pool, params.arguments || {});
+                        return res.json({ content: [{ type: 'text', text: JSON.stringify({ candidateSignals: signals }, null, 2) }] });
+                    }
+                    if (route.mode === 'proposal_context') {
+                        const context = await getProposalContext(pool, params.arguments || {});
+                        return res.json({ content: [{ type: 'text', text: JSON.stringify({ proposalContext: context }, null, 2) }] });
+                    }
+                    const dashboardData = await getDashboardPayload({ ...(params.arguments || {}), view: route.mode });
+                    if (!route.section) {
+                        return res.json({ content: [{ type: 'text', text: JSON.stringify(dashboardData, null, 2) }] });
+                    }
+                    if (!Object.prototype.hasOwnProperty.call(dashboardData, route.section)) {
+                        return res.status(400).json({
+                            error: `Dashboard section ${route.section} was not returned by ${route.mode} view.`,
+                            availableSections: Object.keys(dashboardData || {}).sort()
+                        });
+                    }
+                    return res.json({ content: [{ type: 'text', text: JSON.stringify({ [route.section]: dashboardData[route.section] }, null, 2) }] });
                 }
-                return res.json({ content: [{ type: 'text', text: JSON.stringify(dashboardData, null, 2) }] });
+                const view = String(params.arguments?.view || '').trim();
+                if (view) {
+                    const dashboardData = await getDashboardPayload(params.arguments || {});
+                    return res.json({ content: [{ type: 'text', text: JSON.stringify(dashboardData, null, 2) }] });
+                }
+                const context = await getCompactDecisionContext(pool, params.arguments || {});
+                return res.json({ content: [{ type: 'text', text: JSON.stringify(context, null, 2) }] });
             } else if (params.name === 'get_decision_context') {
-                const dashboardData = await getCompactDashboardPayload();
-                if (!dashboardData) return res.status(404).json({ error: 'No data found. Please trigger a refresh.' });
-                return res.json({ content: [{ type: 'text', text: JSON.stringify(compactDecisionContext(dashboardData), null, 2) }] });
+                const context = await getCompactDecisionContext(pool, params.arguments || {});
+                return res.json({ content: [{ type: 'text', text: JSON.stringify(context, null, 2) }] });
+            } else if (params.name === 'get_proposal_context') {
+                const context = await getProposalContext(pool, params.arguments || {});
+                return res.json({ content: [{ type: 'text', text: JSON.stringify(context, null, 2) }] });
             } else if (params.name === 'create_dashboard_magic_link') {
                 const link = await createDashboardMagicLink(pool, {
                     ...(params.arguments || {}),
@@ -1399,6 +1547,7 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                 const proposal = params.arguments?.proposal;
                 if (!proposal || !proposal.proposal_id) return res.status(400).json({ error: 'Missing or invalid proposal argument (proposal_id required)' });
                 const saved = await upsertProposal(pool, proposal);
+                clearDashboardViewPayloadCache();
 
                 return res.json({ content: [{ type: 'text', text: JSON.stringify({ message: 'Proposal created successfully.', proposal: saved }, null, 2) }] });
             } else if (params.name === 'record_proposal_decision') {
@@ -1410,6 +1559,7 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     action,
                     selectedOptionId: params.arguments?.selected_option_id || null
                 });
+                clearDashboardViewPayloadCache();
                 return res.json({ content: [{ type: 'text', text: JSON.stringify(proposal, null, 2) }] });
             } else if (params.name === 'create_proposal_feedback') {
                 const proposalId = params.arguments?.proposal_id;
@@ -1423,6 +1573,7 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     customerId: params.arguments?.customer_id || null,
                     createdBy: params.arguments?.created_by || 'agent'
                 });
+                clearDashboardViewPayloadCache();
                 return res.json({ content: [{ type: 'text', text: JSON.stringify({ message: 'Proposal feedback saved successfully.', feedback }, null, 2) }] });
             } else if (params.name === 'list_proposal_feedback') {
                 const feedback = await listProposalFeedback(pool, {
@@ -1443,10 +1594,10 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                     reviewedBy: params.arguments?.reviewed_by || 'agent',
                     reviewerNote: params.arguments?.reviewer_note || null
                 });
+                clearDashboardViewPayloadCache();
                 return res.json({ content: [{ type: 'text', text: JSON.stringify({ message: 'Proposal feedback status updated successfully.', feedback }, null, 2) }] });
             } else if (params.name === 'get_candidate_signals') {
-                const filePath = path.join(__dirname, 'data', 'latest', 'deterministic_insights.json');
-                const signals = fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, 'utf8')) : [];
+                const signals = await getCandidateSignalsPayload(pool, params.arguments || {});
                 return res.json({ content: [{ type: 'text', text: JSON.stringify(signals, null, 2) }] });
             } else if (params.name === 'get_learning_summary') {
                 const rates = await pool.query(`SELECT strategy_id, alpha, beta, sample_count, last_updated FROM strategy_success_rates ORDER BY strategy_id ASC`);
@@ -1521,20 +1672,26 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
                      ON CONFLICT (diagnosis_id) DO UPDATE SET payload = EXCLUDED.payload`,
                     [diagnosis.id, diagnosis]
                 );
+                clearDashboardViewPayloadCache();
                 return res.json({ content: [{ type: 'text', text: 'Diagnosis created successfully.' }] });
             } else if (params.name === 'clear_proposals') {
                 await pool.query(`TRUNCATE TABLE proposals CASCADE`);
+                clearDashboardViewPayloadCache();
                 return res.json({ content: [{ type: 'text', text: 'All proposals cleared successfully.' }] });
             } else if (params.name === 'clear_diagnoses') {
                 await pool.query(`TRUNCATE TABLE ai_diagnoses`);
+                clearDashboardViewPayloadCache();
                 return res.json({ content: [{ type: 'text', text: 'All AI diagnoses cleared successfully.' }] });
             } else if (params.name === 'trigger_refresh') {
                 try {
-                    const started = startRefreshJob(params.arguments?.startDate, params.arguments?.endDate);
-                    if (!started) {
-                        return res.json({ content: [{ type: 'text', text: 'Refresh already in progress.' }] });
-                    }
-                    return res.json({ content: [{ type: 'text', text: 'Data refresh started in background.' }] });
+                    const result = startRefreshJob({
+                        startDate: params.arguments?.startDate,
+                        endDate: params.arguments?.endDate,
+                        force: params.arguments?.force !== false,
+                        source: 'mcp'
+                    });
+                    const suffix = result.nextAllowedAt ? ` Next allowed at ${result.nextAllowedAt}.` : '';
+                    return res.json({ content: [{ type: 'text', text: `${result.message}${suffix}` }] });
                 } catch (err: any) {
                     return res.json({ content: [{ type: 'text', text: `Refresh failed: ${err.message}` }], isError: true });
                 }
@@ -1553,11 +1710,13 @@ app.post('/api/mcp', authenticate, async (req: Request, res: Response) => {
             || err instanceof SemanticMemoryConfigurationError
             || err?.name === 'SemanticMemoryConfigurationError'
             ? semanticMemoryStatusCode(err)
-            : err instanceof ProposalValidationError || err?.name === 'ProposalValidationError' || err instanceof KeywordPlannerValidationError || err?.name === 'KeywordPlannerValidationError'
-                ? 400
-                : String(err?.message || '').startsWith('Proposal not found:') || String(err?.message || '').startsWith('Proposal feedback not found:')
-                    ? 404
-                    : 500;
+            : err instanceof DashboardPayloadValidationError || err?.name === 'DashboardPayloadValidationError' || err instanceof WarehouseDataNotFoundError || err?.name === 'WarehouseDataNotFoundError'
+                ? dashboardErrorStatus(err)
+                : err instanceof ProposalValidationError || err?.name === 'ProposalValidationError' || err instanceof KeywordPlannerValidationError || err?.name === 'KeywordPlannerValidationError'
+                    ? 400
+                    : String(err?.message || '').startsWith('Proposal not found:') || String(err?.message || '').startsWith('Proposal feedback not found:')
+                        ? 404
+                        : 500;
         res.status(statusCode).json({ error: err.message, isError: true });
     }
 });

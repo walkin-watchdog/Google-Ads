@@ -370,9 +370,9 @@ export async function refreshKeywordPlannerFeed(input: {
     customerId: string;
     keywordRows: any[];
     searchTermRows: any[];
-    ideasOutputPath: string;
-    historicalOutputPath: string;
-    statusOutputPath: string;
+    ideasOutputPath?: string | null;
+    historicalOutputPath?: string | null;
+    statusOutputPath?: string | null;
 }): Promise<KeywordPlannerRefreshResult> {
     const seeds = collectPlannerSeeds({ keywordRows: input.keywordRows, searchTermRows: input.searchTermRows });
     const options = normalizedOptions({ keywords: seeds, url: defaultKeywordPlannerUrl() });
@@ -392,9 +392,9 @@ export async function refreshKeywordPlannerFeed(input: {
             message: 'No keyword or URL seeds available for Keyword Planner.',
             seeds: seedSummary
         };
-        writeJsonAtomic(input.ideasOutputPath, []);
-        writeJsonAtomic(input.historicalOutputPath, []);
-        writeJsonAtomic(input.statusOutputPath, refreshStatusPayload(empty));
+        if (input.ideasOutputPath) writeJsonAtomic(input.ideasOutputPath, []);
+        if (input.historicalOutputPath) writeJsonAtomic(input.historicalOutputPath, []);
+        if (input.statusOutputPath) writeJsonAtomic(input.statusOutputPath, refreshStatusPayload(empty));
         return empty;
     }
     try {
@@ -409,9 +409,9 @@ export async function refreshKeywordPlannerFeed(input: {
             message: `Fetched ${ideas.length} keyword ideas and ${historicalMetrics.length} historical metric rows from Keyword Planner.`,
             seeds: seedSummary
         };
-        writeJsonAtomic(input.ideasOutputPath, ideas);
-        writeJsonAtomic(input.historicalOutputPath, historicalMetrics);
-        writeJsonAtomic(input.statusOutputPath, refreshStatusPayload(result));
+        if (input.ideasOutputPath) writeJsonAtomic(input.ideasOutputPath, ideas);
+        if (input.historicalOutputPath) writeJsonAtomic(input.historicalOutputPath, historicalMetrics);
+        if (input.statusOutputPath) writeJsonAtomic(input.statusOutputPath, refreshStatusPayload(result));
         return result;
     } catch (err: any) {
         const result: KeywordPlannerRefreshResult = {
@@ -421,9 +421,9 @@ export async function refreshKeywordPlannerFeed(input: {
             message: err?.message || String(err),
             seeds: seedSummary
         };
-        writeJsonAtomic(input.ideasOutputPath, []);
-        writeJsonAtomic(input.historicalOutputPath, []);
-        writeJsonAtomic(input.statusOutputPath, refreshStatusPayload(result));
+        if (input.ideasOutputPath) writeJsonAtomic(input.ideasOutputPath, []);
+        if (input.historicalOutputPath) writeJsonAtomic(input.historicalOutputPath, []);
+        if (input.statusOutputPath) writeJsonAtomic(input.statusOutputPath, refreshStatusPayload(result));
         return result;
     }
 }

@@ -14,6 +14,7 @@ reports:
     purpose: Executive KPIs for the selected date range.
     resource: customer
     fields:
+      - segments.date
       - customer.id
       - customer.currency_code
       - metrics.cost_micros
@@ -81,6 +82,23 @@ reports:
     conditions:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
 
+  campaign_config:
+    purpose: Current campaign configuration snapshot independent of date-window metrics.
+    resource: campaign
+    fields:
+      - campaign.name
+      - campaign.id
+      - campaign.status
+      - campaign.bidding_strategy_type
+      - campaign.target_cpa.target_cpa_micros
+      - campaign.maximize_conversions.target_cpa_micros
+      - campaign.target_roas.target_roas
+      - campaign.maximize_conversion_value.target_roas
+      - campaign_budget.resource_name
+      - campaign_budget.amount_micros
+    conditions:
+      - "campaign.status != REMOVED"
+
   ad_group_performance:
     purpose: Find strong, weak or fragmented ad groups.
     resource: ad_group
@@ -102,6 +120,18 @@ reports:
       - metrics.search_impression_share
     conditions:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
+
+  ad_group_config:
+    purpose: Current ad group configuration snapshot independent of date-window metrics.
+    resource: ad_group
+    fields:
+      - ad_group.name
+      - ad_group.id
+      - ad_group.status
+      - campaign.id
+      - campaign.name
+    conditions:
+      - "ad_group.status != REMOVED"
 
   keyword_performance:
     purpose: Identify keyword winners, losers, high-CPC terms and zero-conversion spend.
@@ -164,7 +194,9 @@ reports:
     fields:
       - segments.date
       - segments.device
+      - campaign.id
       - campaign.name
+      - ad_group.id
       - ad_group.name
       - metrics.cost_micros
       - metrics.clicks
@@ -183,7 +215,9 @@ reports:
     fields:
       - segments.date
       - segments.day_of_week
+      - campaign.id
       - campaign.name
+      - ad_group.id
       - ad_group.name
       - metrics.cost_micros
       - metrics.clicks
@@ -251,7 +285,9 @@ reports:
       - segments.date
       - segments.day_of_week
       - segments.hour
+      - campaign.id
       - campaign.name
+      - ad_group.id
       - ad_group.name
       - metrics.cost_micros
       - metrics.clicks
@@ -268,6 +304,7 @@ reports:
     resource: conversion_action
     fields:
       - segments.date
+      - conversion_action.resource_name
       - conversion_action.id
       - conversion_action.name
       - conversion_action.type
@@ -302,6 +339,7 @@ reports:
       - segments.conversion_action_name
       - segments.conversion_action_category
       - metrics.conversions
+      - metrics.conversions_value
       - metrics.all_conversions
     conditions:
       - "segments.date BETWEEN '<START_DATE>' AND '<END_DATE>'"
@@ -317,7 +355,9 @@ reports:
     fields:
       - segments.date
       - click_view.gclid
+      - campaign.id
       - campaign.name
+      - ad_group.id
       - ad_group.name
       - click_view.keyword_info.text
       - click_view.keyword_info.match_type
@@ -327,7 +367,9 @@ reports:
       - metrics.clicks
     conditions:
       - "segments.date = '<YYYY-MM-DD>'"
-    caveat: "ClickView requires a single-day date filter. It does not include website session events; persist GCLID/GBRAID/WBRAID in your app for exact session proof."
+    max_lookback_days: 90
+    no_future_dates: true
+    caveat: "ClickView requires a single-day date filter and is available only up to 90 days before request time. It does not include website session events; persist GCLID/GBRAID/WBRAID in your app for exact session proof."
 
   change_history:
     purpose: Read-only Google Ads change history used to detect confounders during proposal impact scoring.
@@ -342,10 +384,8 @@ reports:
       - change_event.old_resource
       - change_event.new_resource
       - change_event.resource_name
-      - campaign.id
-      - campaign.name
-      - ad_group.id
-      - ad_group.name
+      - change_event.campaign
+      - change_event.ad_group
     conditions:
       - "change_event.change_date_time BETWEEN '<CHANGE_START_DATE>' AND '<CHANGE_END_DATE>'"
     orderings:
@@ -405,6 +445,7 @@ reports:
       - ad_group_criterion.keyword.text
       - ad_group_criterion.keyword.match_type
       - ad_group_criterion.status
+      - ad_group_criterion.cpc_bid_micros
       - ad_group_criterion.final_urls
       - ad_group_criterion.primary_status
       - ad_group_criterion.primary_status_reasons

@@ -11,6 +11,15 @@ const MAX_SESSION_MINUTES = 12 * 60;
 const AUTH_RECORD_RETENTION_DAYS = 7;
 const SESSION_COOKIE = 'dashboard_session';
 const MAGIC_TOKEN_COOKIE = 'dashboard_magic_token';
+const DEFAULT_DASHBOARD_SESSION_AUTH_CACHE_SECONDS = 60;
+const DEFAULT_DASHBOARD_SESSION_AUTH_CACHE_MAX_ENTRIES = 1000;
+
+type DashboardSessionAuthCacheEntry = {
+  expiresAt: number;
+  lastAccessedAt: number;
+};
+
+const dashboardSessionAuthCache = new Map<string, DashboardSessionAuthCacheEntry>();
 
 type DashboardAuthOptions = {
   pool: Pool;
@@ -31,6 +40,44 @@ export type MagicLinkResult = {
 
 function sha256(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function positiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+function dashboardSessionAuthCacheTtlMs(): number {
+  return positiveIntegerEnv('DASHBOARD_SESSION_AUTH_CACHE_SECONDS', DEFAULT_DASHBOARD_SESSION_AUTH_CACHE_SECONDS) * 1000;
+}
+
+function dashboardSessionAuthCacheMaxEntries(): number {
+  return positiveIntegerEnv('DASHBOARD_SESSION_AUTH_CACHE_MAX_ENTRIES', DEFAULT_DASHBOARD_SESSION_AUTH_CACHE_MAX_ENTRIES);
+}
+
+function pruneDashboardSessionAuthCache(now = Date.now()): void {
+  for (const [sessionHash, entry] of dashboardSessionAuthCache) {
+    if (entry.expiresAt <= now) dashboardSessionAuthCache.delete(sessionHash);
+  }
+  const maxEntries = dashboardSessionAuthCacheMaxEntries();
+  if (maxEntries <= 0) {
+    dashboardSessionAuthCache.clear();
+    return;
+  }
+  while (dashboardSessionAuthCache.size > maxEntries) {
+    const oldest = Array.from(dashboardSessionAuthCache.entries())
+      .sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt)[0];
+    if (!oldest) break;
+    dashboardSessionAuthCache.delete(oldest[0]);
+  }
+}
+
+export function clearDashboardSessionAuthCache(sessionToken?: string): void {
+  if (sessionToken) {
+    dashboardSessionAuthCache.delete(sha256(sessionToken));
+    return;
+  }
+  dashboardSessionAuthCache.clear();
 }
 
 function randomToken(bytes: number): string {
@@ -619,14 +666,34 @@ async function hasDashboardSession(pool: Pool, req: Request): Promise<boolean> {
   const sessionToken = readCookie(req, SESSION_COOKIE);
   if (!sessionToken) return false;
   if (sessionToken.length < 20 || sessionToken.length > 200) return false;
+  const sessionHash = sha256(sessionToken);
+  const ttlMs = dashboardSessionAuthCacheTtlMs();
+  if (ttlMs > 0) {
+    const now = Date.now();
+    const cached = dashboardSessionAuthCache.get(sessionHash);
+    if (cached && cached.expiresAt > now) {
+      cached.lastAccessedAt = now;
+      return true;
+    }
+    if (cached) dashboardSessionAuthCache.delete(sessionHash);
+  }
   const result = await pool.query(
     `UPDATE dashboard_sessions
          SET last_seen_at = now()
          WHERE session_hash = $1 AND revoked_at IS NULL AND expires_at > now()
          RETURNING id`,
-    [sha256(sessionToken)]
+    [sessionHash]
   );
-  return result.rows.length > 0;
+  const isValid = result.rows.length > 0;
+  if (isValid && ttlMs > 0) {
+    const now = Date.now();
+    dashboardSessionAuthCache.set(sessionHash, {
+      expiresAt: now + ttlMs,
+      lastAccessedAt: now
+    });
+    pruneDashboardSessionAuthCache(now);
+  }
+  return isValid;
 }
 
 function dashboardCookieSecure(req?: Request): boolean {
@@ -678,6 +745,7 @@ export function readDashboardMagicTokenCookie(req: Request): string {
 export async function revokeDashboardSession(pool: Pool, req: Request): Promise<void> {
   const sessionToken = readCookie(req, SESSION_COOKIE);
   if (!sessionToken) return;
+  clearDashboardSessionAuthCache(sessionToken);
   await pool.query(
     `UPDATE dashboard_sessions
          SET revoked_at = COALESCE(revoked_at, now())

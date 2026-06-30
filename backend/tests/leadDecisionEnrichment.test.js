@@ -13,7 +13,7 @@ describe('enrichDashboardDecisionRows', () => {
         ]
     };
 
-    test('adds scoped lead quality and source freshness to search terms', () => {
+    test('adds scoped lead quality and shared source freshness to dashboard enrichment', () => {
         const payload = enrichDashboardDecisionRows({
             sourceCoverage: {
                 sources: [
@@ -29,9 +29,11 @@ describe('enrichDashboardDecisionRows', () => {
 
         expect(payload.searchTerms[0].leadQuality.tone).toBe('negative');
         expect(payload.searchTerms[0].leadQuality.useless).toBe(2);
-        expect(payload.searchTerms[0].sourceFreshness.searchTerms.status).toBe('ok');
-        expect(payload.searchTerms[0].sourceFreshness.configuredKeywords.status).toBe('stale');
-        expect(payload.searchTerms[1].leadQuality.scope).toBe('term');
+        expect(payload.searchTerms[0]).not.toHaveProperty('sourceFreshness');
+        expect(payload.decisionInputEnrichment.sourceFreshness.searchTerms.status).toBe('ok');
+        expect(payload.decisionInputEnrichment.sourceFreshness.configuredKeywords.status).toBe('stale');
+        expect(payload.searchTerms[1]).not.toHaveProperty('leadQuality');
+        expect(payload.searchTerms[1].leadQualityStatus).toBe('missing');
     });
 
     test('adds planner counter-evidence and related search-term evidence', () => {
@@ -56,5 +58,24 @@ describe('enrichDashboardDecisionRows', () => {
         expect(payload.competitorBreakdown[0].leadQuality.tone).toBe('positive');
         expect(payload.competitorBreakdown[0].realLeadCount).toBe(1);
         expect(payload.competitorBreakdown[0].qualifiedOrConvertedLeads).toBe(1);
+    });
+
+    test('uses campaign-scoped overview lead quality rows when full leads are trimmed', () => {
+        const payload = enrichDashboardDecisionRows({
+            searchTerms: [
+                { campaignId: '100', searchTerm: 'free whatsapp crm', spend: 100 },
+                { campaignId: '999', searchTerm: 'free whatsapp crm', spend: 100 }
+            ]
+        }, {
+            totals: { uniqueLeads: 2 },
+            bySearchTerm: [
+                { campaignId: '100', searchTerm: 'free whatsapp crm', uniqueLeads: 2, useless: 2, eventCount: 2 }
+            ]
+        });
+
+        expect(payload.searchTerms[0].leadQuality.scope).toBe('campaign_term');
+        expect(payload.searchTerms[0].leadQuality.useless).toBe(2);
+        expect(payload.searchTerms[1]).not.toHaveProperty('leadQuality');
+        expect(payload.searchTerms[1].leadQualityStatus).toBe('missing');
     });
 });

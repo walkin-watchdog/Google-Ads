@@ -1,7 +1,6 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
+import { getImpactMetricWindow } from './adsWarehouse';
 
 export const PROPOSAL_STATUSES = [
     'pending_review',
@@ -469,23 +468,6 @@ export function normalizeProposal(input: any, optionsInput: NormalizeProposalOpt
     };
 }
 
-const DATA_DIR = path.resolve(__dirname, '..', 'data', 'latest');
-
-function readJsonArray(fileName: string): any[] {
-    try {
-        const filePath = path.join(DATA_DIR, fileName);
-        if (!fs.existsSync(filePath)) return [];
-        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        return Array.isArray(parsed) ? parsed : [];
-    } catch {
-        return [];
-    }
-}
-
-function moneyMicros(value: any): number {
-    return Number(value || 0) / 1_000_000;
-}
-
 function campaignIdForOption(proposal: ProposalPayload, option: ProposalOptionPayload): string | null {
     const spec = (option.verification_spec || {}) as Partial<VerificationSpec>;
     const entity = spec.entity || {};
@@ -501,97 +483,111 @@ function campaignIdForOption(proposal: ProposalPayload, option: ProposalOptionPa
     return raw == null || raw === '' ? null : String(raw);
 }
 
-function normText(value: any): string {
-    return String(value || '').trim().toLowerCase();
+function cleanString(value: any): string | null {
+    const text = String(value ?? '').trim();
+    return text || null;
 }
 
-function aggregateBaseline(rows: any[], scope: string, entity: Record<string, any>): any | null {
-    if (rows.length === 0) return null;
-
-    let spend = 0;
-    let clicks = 0;
-    let impressions = 0;
-    let conversions = 0;
-    let conversionValue = 0;
-    let start: string | null = null;
-    let end: string | null = null;
-
-    for (const row of rows) {
-        spend += moneyMicros(row['metrics.cost_micros']);
-        clicks += Number(row['metrics.clicks'] || 0);
-        impressions += Number(row['metrics.impressions'] || 0);
-        conversions += Number(row['metrics.conversions'] || 0);
-        conversionValue += Number(row['metrics.conversions_value'] || 0);
-        const date = row['segments.date'];
-        if (date) {
-            if (!start || date < start) start = date;
-            if (!end || date > end) end = date;
-        }
-    }
-
-    const days = start && end
-        ? Math.max(1, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 86400000) + 1)
-        : 30;
-
-    return {
-        captured_at: new Date().toISOString(),
-        scope,
-        entity,
-        campaign_id: entity.campaign_id || null,
-        spend,
-        clicks,
-        impressions,
-        conversions,
-        conversionValue,
-        cpa: conversions > 0 ? spend / conversions : 0,
-        roas: spend > 0 ? conversionValue / spend : 0,
-        days,
-        start,
-        end
-    };
+function isoDateOrNull(value: any): string | null {
+    const text = cleanString(value);
+    return text && /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
 }
 
-function captureOptionBaseline(proposal: ProposalPayload, option: ProposalOptionPayload): any | null {
+function addDaysIso(date: string, days: number): string {
+    const [year, month, day] = date.split('-').map(Number);
+    return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+function daysInclusive(start: string, end: string): number {
+    return Math.max(1, Math.floor((Date.parse(end) - Date.parse(start)) / 86400000) + 1);
+}
+
+function baselineWindow(proposal: ProposalPayload): { start: string; end: string; endExclusive: string; days: number } {
+    const today = new Date().toISOString().slice(0, 10);
+    const end = isoDateOrNull(proposal.evidence_window?.end) || today;
+    const start = isoDateOrNull(proposal.evidence_window?.start) || addDaysIso(end, -29);
+    return { start, end, endExclusive: addDaysIso(end, 1), days: daysInclusive(start, end) };
+}
+
+async function customerIdForBaseline(db: Pool | PoolClient, proposal: ProposalPayload): Promise<string | null> {
+    const explicit = cleanString(proposal.customer_id || proposal.customerId || process.env.GOOGLE_ADS_CUSTOMER_ID || process.env.GOOGLE_ADS_CUSTOMER);
+    if (explicit) return explicit;
+    const fromRun = await db.query(
+        `SELECT customer_id
+         FROM google_ads_refresh_runs
+         WHERE customer_id IS NOT NULL
+         ORDER BY started_at DESC
+         LIMIT 1`
+    );
+    const runCustomer = cleanString(fromRun.rows[0]?.customer_id);
+    if (runCustomer) return runCustomer;
+    const fromFact = await db.query(`SELECT customer_id FROM google_ads_campaign_daily LIMIT 1`);
+    return cleanString(fromFact.rows[0]?.customer_id);
+}
+
+async function captureOptionBaseline(db: Pool | PoolClient, proposal: ProposalPayload, option: ProposalOptionPayload): Promise<any | null> {
     const verification = normalizeVerificationSpec(option.verification_spec, `proposal ${proposal.proposal_id} option ${option.option_id}`);
     const campaignId = campaignIdForOption(proposal, option);
-    if (!campaignId) return null;
+    const customerId = await customerIdForBaseline(db, proposal);
+    if (!campaignId || !customerId) return null;
+
+    const entity = verification.entity || {};
+    const campaignName = cleanString(entity.campaign_name || entity.campaignName || proposal.campaign_name || proposal.campaignName);
+    const window = baselineWindow(proposal);
+    let scope: 'campaign' | 'keyword' | 'search_term' = 'campaign';
+    let baselineEntity: Record<string, any> = { campaign_id: campaignId, campaign_name: campaignName };
 
     if (verification.kind === 'keyword_status' || verification.kind === 'manual_bid_changed') {
-        const entity = verification.entity;
-        const rows = readJsonArray('keyword-performance.json').filter(row => {
-            if (String(row['campaign.id'] || '') !== campaignId) return false;
-            if (entity.ad_group_id && String(row['ad_group.id'] || '') !== String(entity.ad_group_id)) return false;
-            if (entity.criterion_id) return String(row['ad_group_criterion.criterion_id'] || '') === String(entity.criterion_id);
-            if (entity.keyword_text && normText(row['ad_group_criterion.keyword.text']) !== normText(entity.keyword_text)) return false;
-            if (entity.match_type && String(row['ad_group_criterion.keyword.match_type'] || '') !== String(entity.match_type)) return false;
-            return Boolean(entity.keyword_text);
-        });
-        return aggregateBaseline(rows, 'keyword', {
+        scope = 'keyword';
+        baselineEntity = {
             campaign_id: campaignId,
+            campaign_name: campaignName,
             ad_group_id: entity.ad_group_id || null,
             criterion_id: entity.criterion_id || null,
             keyword_text: entity.keyword_text || null,
             match_type: entity.match_type || null
-        });
-    }
-
-    if (verification.kind === 'negative_search_term_added' || verification.kind === 'keyword_added_exact') {
-        const entity = verification.entity;
-        const searchTerm = entity.search_term || entity.keyword_text;
-        const rows = readJsonArray('search-term-performance.json').filter(row => {
-            if (String(row['campaign.id'] || '') !== campaignId) return false;
-            if (entity.ad_group_id && String(row['ad_group.id'] || '') !== String(entity.ad_group_id)) return false;
-            return normText(row['search_term_view.search_term']) === normText(searchTerm);
-        });
-        return aggregateBaseline(rows, 'search_term', {
+        };
+    } else if (verification.kind === 'negative_search_term_added' || verification.kind === 'keyword_added_exact') {
+        scope = 'search_term';
+        baselineEntity = {
             campaign_id: campaignId,
+            campaign_name: campaignName,
             ad_group_id: entity.ad_group_id || null,
-            search_term: searchTerm || null
-        });
+            search_term: entity.search_term || entity.keyword_text || null
+        };
     }
 
-    const rows = readJsonArray('campaign-performance.json').filter(row => String(row['campaign.id'] || '') === String(campaignId));
-    return aggregateBaseline(rows, 'campaign', { campaign_id: campaignId });
+    const metrics = await getImpactMetricWindow(db, {
+        customerId,
+        startDate: window.start,
+        endDate: window.endExclusive,
+        scope,
+        campaignId,
+        adGroupId: cleanString(entity.ad_group_id),
+        criterionId: cleanString(entity.criterion_id),
+        keywordText: scope === 'keyword' ? cleanString(entity.keyword_text) : null,
+        matchType: scope === 'keyword' ? cleanString(entity.match_type) : null,
+        searchTerm: scope === 'search_term' ? cleanString(entity.search_term || entity.keyword_text) : null,
+        mode: 'target'
+    });
+
+    return {
+        captured_at: new Date().toISOString(),
+        scope,
+        entity: baselineEntity,
+        campaign_id: campaignId,
+        campaign_name: campaignName,
+        spend: metrics.spend,
+        clicks: metrics.clicks,
+        impressions: metrics.impressions,
+        conversions: metrics.conversions,
+        conversionValue: metrics.conversionValue,
+        cpa: metrics.cpa,
+        roas: metrics.roas,
+        days: window.days,
+        start: window.start,
+        end: window.end
+    };
 }
 
 function optionUid(proposalId: string, optionId: string): string {
@@ -600,11 +596,6 @@ function optionUid(proposalId: string, optionId: string): string {
 
 export async function ensureDatabaseSchema(pool: Pool): Promise<void> {
     await pool.query(`
-        CREATE TABLE IF NOT EXISTS dashboard_payloads (
-            id VARCHAR(50) PRIMARY KEY,
-            payload JSONB NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
         CREATE TABLE IF NOT EXISTS proposals (
             proposal_id VARCHAR(100) PRIMARY KEY,
             payload JSONB NOT NULL,
@@ -773,7 +764,7 @@ export async function upsertProposal(pool: Pool, rawProposal: any): Promise<Prop
         for (const option of proposal.options) {
             option.baseline_metrics = existingBaselines.get(option.option_id)
                 || option.baseline_metrics
-                || captureOptionBaseline(proposal, option);
+                || await captureOptionBaseline(client, proposal, option);
         }
         await client.query(
             `INSERT INTO proposals (proposal_id, payload, status, selected_option_id, campaign_id, type, created_by, source_signal_ids, evidence_window, updated_at)

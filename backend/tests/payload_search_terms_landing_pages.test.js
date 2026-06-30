@@ -141,7 +141,7 @@ describe('searchTermData — new match fields', () => {
     'segments.keyword.info.text': 'whatsapp api',
     'segments.keyword.info.match_type': 'BROAD',
     'segments.search_term_match_type': 'BROAD',
-    'segments.search_term_match_source': 'ADVERTISER_KEYWORD',
+    'segments.search_term_match_source': 'ADVERTISER_PROVIDED_KEYWORD',
     'metrics.cost_micros': '1200000',
     'metrics.clicks': '40',
     'metrics.impressions': '800',
@@ -154,7 +154,7 @@ describe('searchTermData — new match fields', () => {
   it('matchedKeyword', () => expect(row.matchedKeyword).toBe('whatsapp api'));
   it('keywordMatchType', () => expect(row.keywordMatchType).toBe('BROAD'));
   it('searchTermMatchType', () => expect(row.searchTermMatchType).toBe('BROAD'));
-  it('searchTermMatchSource', () => expect(row.searchTermMatchSource).toBe('ADVERTISER_KEYWORD'));
+  it('searchTermMatchSource', () => expect(row.searchTermMatchSource).toBe('ADVERTISER_PROVIDED_KEYWORD'));
   it('spend in dollars', () => expect(row.spend).toBe(1.2));
   it('cvr computed', () => expect(row.cvr).toBeGreaterThan(0));
 });

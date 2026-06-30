@@ -113,10 +113,12 @@ function buildLeadIndexes(leadAttribution: any): {
     hasLeadData: boolean;
     byTerm: Map<string, LeadQualitySummary>;
     byCampaignTerm: Map<string, LeadQualitySummary>;
+    campaignScopedTerms: Map<string, Set<string>>;
     leads: any[];
 } {
     const byTerm = new Map<string, LeadQualitySummary>();
     const byCampaignTerm = new Map<string, LeadQualitySummary>();
+    const campaignScopedTerms = new Map<string, Set<string>>();
     const leads = Array.isArray(leadAttribution?.allLeads) ? leadAttribution.allLeads : [];
 
     for (const lead of leads) {
@@ -124,13 +126,19 @@ function buildLeadIndexes(leadAttribution: any): {
         const campaignId = leadCampaignId(lead);
         if (!term) continue;
         addBucket(byTerm, term, 'term', lead);
-        if (campaignId) addBucket(byCampaignTerm, `${campaignId}|${term}`, 'campaign_term', lead);
+        if (campaignId) {
+            addBucket(byCampaignTerm, `${campaignId}|${term}`, 'campaign_term', lead);
+            const campaigns = campaignScopedTerms.get(term) || new Set<string>();
+            campaigns.add(campaignId);
+            campaignScopedTerms.set(term, campaigns);
+        }
     }
 
     if (leads.length === 0 && Array.isArray(leadAttribution?.bySearchTerm)) {
         for (const row of leadAttribution.bySearchTerm) {
             const term = termKey(row?.searchTerm || row?.keyword);
             if (!term) continue;
+            const campaignId = clean(row?.campaignId || row?.campaign_id);
             const bucket: LeadQualitySummary = {
                 ...emptyLeadQuality('term'),
                 uniqueLeads: Number(row.uniqueLeads || 0),
@@ -141,7 +149,17 @@ function buildLeadIndexes(leadAttribution: any): {
                 qualifiedLost: Number(row.qualifiedLost || 0),
                 converted: Number(row.converted || 0)
             };
-            byTerm.set(term, finalizeLeadQuality(bucket));
+            const finalized = finalizeLeadQuality(bucket);
+            byTerm.set(term, finalized);
+            if (campaignId && campaignId !== '(none)') {
+                byCampaignTerm.set(`${campaignId}|${term}`, {
+                    ...finalized,
+                    scope: 'campaign_term'
+                });
+                const campaigns = campaignScopedTerms.get(term) || new Set<string>();
+                campaigns.add(campaignId);
+                campaignScopedTerms.set(term, campaigns);
+            }
         }
     }
 
@@ -149,7 +167,7 @@ function buildLeadIndexes(leadAttribution: any): {
     for (const [key, bucket] of byCampaignTerm) byCampaignTerm.set(key, finalizeLeadQuality(bucket));
 
     const totalLeads = Number(leadAttribution?.totals?.uniqueLeads || 0);
-    return { hasLeadData: leads.length > 0 || totalLeads > 0 || byTerm.size > 0, byTerm, byCampaignTerm, leads };
+    return { hasLeadData: leads.length > 0 || totalLeads > 0 || byTerm.size > 0, byTerm, byCampaignTerm, campaignScopedTerms, leads };
 }
 
 function leadQualityForRow(indexes: ReturnType<typeof buildLeadIndexes>, row: any, termField: string): LeadQualitySummary | null {
@@ -157,6 +175,7 @@ function leadQualityForRow(indexes: ReturnType<typeof buildLeadIndexes>, row: an
     if (!term) return null;
     const campaignId = clean(row?.campaignId || row?.campaign_id);
     const scoped = campaignId ? indexes.byCampaignTerm.get(`${campaignId}|${term}`) : null;
+    if (campaignId && (indexes.campaignScopedTerms.get(term)?.size || 0) > 0 && !scoped) return null;
     return cloneLeadQuality(scoped || indexes.byTerm.get(term) || null);
 }
 
@@ -260,28 +279,27 @@ export function enrichDashboardDecisionRows(payload: any, leadAttribution: any =
     if (Array.isArray(payload.searchTerms)) {
         payload.searchTerms = payload.searchTerms.map((row: any) => {
             const leadQuality = leadQualityForRow(indexes, row, 'searchTerm');
-            return {
+            const enriched = {
                 ...row,
-                leadQuality,
                 leadQualityStatus: leadQuality?.tone || (indexes.hasLeadData ? 'missing' : 'unavailable'),
-                leadQualityReason: leadQuality?.reason || (indexes.hasLeadData ? 'No matching first-party lead rows.' : 'First-party lead attribution is unavailable.'),
-                sourceFreshness
+                leadQualityReason: leadQuality?.reason || (indexes.hasLeadData ? 'No matching first-party lead rows.' : 'First-party lead attribution is unavailable.')
             };
+            if (leadQuality) enriched.leadQuality = leadQuality;
+            return enriched;
         });
     }
 
     const searchTerms = Array.isArray(payload.searchTerms) ? payload.searchTerms : [];
     const enrichPlannerRows = (rows: any[]) => rows.map(row => {
         const leadQuality = leadQualityForRow(indexes, row, 'keyword');
-        return {
-            ...row,
-            leadQuality,
-            leadQualityCounterEvidence: leadQuality && leadQuality.tone === 'negative'
-                ? leadQuality.reason
-                : null,
-            relatedSearchTermEvidence: relatedSearchTermEvidence(searchTerms, row.keyword || row.text),
-            sourceFreshness
-        };
+        const enriched = { ...row };
+        if (leadQuality) {
+            enriched.leadQuality = leadQuality;
+            if (leadQuality.tone === 'negative') enriched.leadQualityCounterEvidence = leadQuality.reason;
+        }
+        const evidence = relatedSearchTermEvidence(searchTerms, row.keyword || row.text);
+        if (evidence.length) enriched.relatedSearchTermEvidence = evidence;
+        return enriched;
     });
 
     if (payload.keywordPlanner) {
@@ -309,6 +327,7 @@ export function enrichDashboardDecisionRows(payload: any, leadAttribution: any =
 
     payload.decisionInputEnrichment = {
         ...(payload.decisionInputEnrichment || {}),
+        sourceFreshness,
         leadAttribution: leadAttribution ? {
             generatedAt: leadAttribution.generatedAt || null,
             uniqueLeads: leadAttribution.totals?.uniqueLeads || 0,

@@ -164,6 +164,18 @@ let dashboardData = null;
 let charts = {};
 let API_BASE_GLOBAL = '';
 let API_KEY_GLOBAL = '';
+const TAB_DASHBOARD_VIEWS = {
+    overview: 'overview',
+    campaigns: 'performance',
+    'ad-groups': 'performance',
+    keywords: 'keywords',
+    attribution: 'attribution',
+    rank: 'rank',
+    proposals: 'proposals'
+};
+const loadedDashboardViews = new Set();
+const dashboardViewPromises = new Map();
+let dashboardLoadGeneration = 0;
 
 function authHeaders(extra = {}) {
     return API_KEY_GLOBAL
@@ -177,6 +189,33 @@ function dashboardFetch(url, options = {}) {
         ...options,
         headers: authHeaders(options.headers || {})
     });
+}
+
+function selectedDashboardFilters(overrides = {}) {
+    const campaignId = overrides.campaignId !== undefined
+        ? overrides.campaignId
+        : document.getElementById('globalCampaignFilter')?.value || localStorage.getItem('globalCampaignId') || 'All';
+    const adGroupId = overrides.adGroupId !== undefined
+        ? overrides.adGroupId
+        : document.getElementById('globalAdGroupFilter')?.value || localStorage.getItem('globalAdGroupId') || 'All';
+    return {
+        startDate: overrides.startDate || localStorage.getItem('globalStartDate') || '',
+        endDate: overrides.endDate || localStorage.getItem('globalEndDate') || '',
+        campaignId: campaignId && campaignId !== 'All' ? campaignId : '',
+        adGroupId: adGroupId && adGroupId !== 'All' ? adGroupId : ''
+    };
+}
+
+function dashboardQueryString(filters = {}) {
+    const params = new URLSearchParams();
+    const selected = selectedDashboardFilters(filters);
+    if (selected.startDate) params.set('startDate', selected.startDate);
+    if (selected.endDate) params.set('endDate', selected.endDate);
+    if (selected.campaignId) params.set('campaignId', selected.campaignId);
+    if (selected.adGroupId) params.set('adGroupId', selected.adGroupId);
+    if (filters.view) params.set('view', filters.view);
+    const query = params.toString();
+    return query ? `?${query}` : '';
 }
 
 // DOM Elements
@@ -283,35 +322,11 @@ async function init() {
                 const e = picker.endDate.format('YYYY-MM-DD');
                 localStorage.setItem('globalStartDate', s);
                 localStorage.setItem('globalEndDate', e);
-
-                if (window.fullData && window.fullData.meta.dateRange.start <= s && window.fullData.meta.dateRange.end >= e) {
-                    applyLocalFilter(s, e);
-                    showToast('Filtered locally.', false);
-                    return;
-                }
-
-                showToast('Fetching latest data... This may take a minute.', false);
-                if (!API_KEY_GLOBAL) {
-                    showToast('This date range requires a backend refresh. Ask the MCP agent to refresh data, then reload the dashboard.', true);
-                    return;
-                }
-                const payload = { startDate: s, endDate: e };
-                dashboardFetch(`${API_BASE}/api/trigger-refresh`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                }).then(res => res.json().then(data => ({ res, data })))
-                    .then(({ res, data }) => {
-                        if (!res.ok) throw new Error(data.error || data.message || 'Server error');
-                        if (res.status === 202 && data.message === 'Refresh already in progress.') {
-                            showToast('Refresh already in progress...', false);
-                        } else {
-                            showToast('Refreshing ...', false);
-                        }
-                        pollForRefreshCompletion(API_BASE, API_KEY);
-                    }).catch(err => {
+                loadDashboardForCurrentFilters('Loading selected date range...')
+                    .then(() => showToast('Dashboard range loaded.', false))
+                    .catch(err => {
                         console.error(err);
-                        showToast(`Refresh failed: ${err.message}`, true);
+                        showToast(`Dashboard load failed: ${err.message}`, true);
                     });
             });
         }
@@ -324,7 +339,9 @@ async function init() {
             const icon = els.refreshBtn.querySelector('.refresh-icon');
             if (icon) icon.classList.add('spin');
             dashboardFetch(`${API_BASE}/api/trigger-refresh`, {
-                method: 'POST'
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force: true })
             }).then(async res => {
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) throw new Error(data.error || data.message || 'Failed to trigger refresh');
@@ -362,13 +379,24 @@ async function init() {
                 return;
             }
             try {
-                const res = await dashboardFetch(`${apiBase}/api/dashboard`);
+                const res = await dashboardFetch(`${apiBase}/api/dashboard${dashboardQueryString({ view: 'overview' })}`);
                 if (res.ok) {
                     const data = await res.json();
                     if (data.meta && data.meta.generatedAt !== initialGeneratedAt) {
                         clearInterval(pollInterval);
-                        showToast('Refresh successful! Reloading...', false);
-                        setTimeout(() => window.location.reload(), 1000);
+                        beginDashboardLoad('overview');
+                        dashboardData = data;
+                        window.fullData = data;
+                        populateGlobalFilters();
+                        renderSidebar();
+                        renderDashboardPayload();
+                        setupComparisonControls();
+                        showToast('Refresh successful. Dashboard reloaded.', false);
+                        if (els.refreshBtn) {
+                            els.refreshBtn.disabled = false;
+                            const icon = els.refreshBtn.querySelector('.refresh-icon');
+                            if (icon) icon.classList.remove('spin');
+                        }
                     }
                 }
             } catch (e) {
@@ -379,7 +407,8 @@ async function init() {
 
     // 2. Now attempt to load data from the database
     try {
-        const res = await dashboardFetch(`${API_BASE}/api/dashboard`);
+        const generation = beginDashboardLoad();
+        const res = await dashboardFetch(`${API_BASE}/api/dashboard${dashboardQueryString({ startDate: startD, endDate: endD, view: 'overview' })}`);
         if (res.status === 401 || res.status === 403) {
             if (API_KEY_GLOBAL) localStorage.removeItem('API_KEY');
             throw new Error(API_KEY_GLOBAL ? 'Invalid API Key. Please refresh to try again.' : 'Dashboard access expired. Open a new magic link.');
@@ -388,13 +417,16 @@ async function init() {
             const errData = await res.json().catch(() => ({}));
             throw new Error(errData.error || errData.message || `Server not responding ${res.status}`);
         }
-        dashboardData = await res.json();
+        const initialDashboard = await res.json();
+        if (generation !== dashboardLoadGeneration) return;
+        dashboardData = initialDashboard;
         window.fullData = dashboardData;
+        resetLoadedDashboardViews('overview');
 
         initTheme();
         renderSidebar();
         populateGlobalFilters();
-        applyLocalFilter(startD, endD);
+        renderDashboardPayload();
         setupFilters();
         makeTablesResponsiveAndSortable();
         setupSearchFilters();
@@ -651,6 +683,13 @@ function setupNav() {
                 document.querySelector('.sidebar').classList.remove('open');
             }
 
+            if (window.fullData) {
+                void ensureDashboardViewForTab(tabId).catch(err => {
+                    console.error(err);
+                    showToast(`Dashboard section load failed: ${err.message}`, true);
+                });
+            }
+
             // Resize charts if they became visible
             Object.values(charts).forEach(chart => {
                 if (chart && typeof chart.resize === 'function') chart.resize();
@@ -767,6 +806,132 @@ function setupFilters() {
     // Filter buttons were removed from the UI.
 }
 
+function activeDashboardTab() {
+    return document.querySelector('.nav-item.active')?.dataset?.tab || 'overview';
+}
+
+function dashboardViewForTab(tabId = activeDashboardTab()) {
+    return TAB_DASHBOARD_VIEWS[tabId] || 'overview';
+}
+
+function resetLoadedDashboardViews(initialView = 'overview') {
+    loadedDashboardViews.clear();
+    dashboardViewPromises.clear();
+    if (initialView) loadedDashboardViews.add(initialView);
+}
+
+function beginDashboardLoad(initialView = '') {
+    dashboardLoadGeneration += 1;
+    resetLoadedDashboardViews(initialView);
+    return dashboardLoadGeneration;
+}
+
+function mergeDashboardPayload(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    dashboardData = {
+        ...(dashboardData || {}),
+        ...payload,
+        meta: {
+            ...(dashboardData?.meta || {}),
+            ...(payload.meta || {})
+        }
+    };
+    window.fullData = dashboardData;
+}
+
+async function fetchDashboardView(view) {
+    const res = await dashboardFetch(`${API_BASE_GLOBAL}/api/dashboard${dashboardQueryString({ view })}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || data.message || `Dashboard ${view} load failed with ${res.status}`);
+    return data;
+}
+
+async function ensureDashboardViewForTab(tabId = activeDashboardTab(), options = {}) {
+    const view = dashboardViewForTab(tabId);
+    if (!view || loadedDashboardViews.has(view)) {
+        if (options.render) renderActiveDashboardTab(tabId);
+        return dashboardData;
+    }
+    const generation = dashboardLoadGeneration;
+    if (!dashboardViewPromises.has(view)) {
+        dashboardViewPromises.set(view, fetchDashboardView(view)
+            .then(data => {
+                if (generation !== dashboardLoadGeneration) return data;
+                mergeDashboardPayload(data);
+                loadedDashboardViews.add(view);
+                return data;
+            })
+            .finally(() => dashboardViewPromises.delete(view)));
+    }
+    const data = await dashboardViewPromises.get(view);
+    if (generation === dashboardLoadGeneration && options.render !== false) renderActiveDashboardTab(tabId);
+    return data;
+}
+
+function renderDashboardPayload() {
+    if (!window.fullData) return;
+    dashboardData = window.fullData;
+    renderGlobalKPIs();
+    renderLeadFunnel();
+    renderKPIs();
+    renderCharts();
+    renderInsights();
+    renderActiveDashboardTab();
+    animateKPIs();
+    const range = dashboardData?.meta?.dateRange || {};
+    if (els.dateRange && range.start && range.end) els.dateRange.textContent = formatDateRange(`${range.start} - ${range.end}`);
+    void ensureDashboardViewForTab(activeDashboardTab()).catch(err => {
+        console.error(err);
+        showToast(`Dashboard section load failed: ${err.message}`, true);
+    });
+}
+
+function renderActiveDashboardTab(tabId = activeDashboardTab()) {
+    if (!dashboardData) return;
+    if (tabId === 'campaigns' || tabId === 'ad-groups') {
+        renderTables();
+        if (dashboardData.campaigns) renderCampaignBubbleChart();
+    } else if (tabId === 'keywords') {
+        renderTables();
+        renderKeywordPlannerExplorer();
+        renderKeywordDiscoveryContext();
+        if (dashboardData.keywords) renderKeywordScatterChart();
+        if (dashboardData.qualityScores) renderQsDoughnutChart();
+    } else if (tabId === 'attribution') {
+        renderAttribution();
+        renderSankeyChart();
+    } else if (tabId === 'rank') {
+        renderRankDiagnostics();
+        renderCompetitorWaste();
+        if (dashboardData.devicePerformance) renderDeviceChart();
+        renderTimePerformance();
+        if (dashboardData.qualityScores) renderQsDoughnutChart();
+        if (dashboardData.campaigns) renderImpressionShareChart();
+        if (dashboardData.dailyCampaigns && dashboardData.dailyCampaigns.length > 0) renderImpressionShareOverTimeChart();
+    } else if (tabId === 'proposals') {
+        renderCandidateSignals();
+        renderProposals();
+    }
+}
+
+async function loadDashboardForCurrentFilters(message = 'Loading dashboard...') {
+    if (message) showToast(message, false);
+    const generation = beginDashboardLoad();
+    const res = await dashboardFetch(`${API_BASE_GLOBAL}/api/dashboard${dashboardQueryString({ view: 'overview' })}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || data.message || `Dashboard load failed with ${res.status}`);
+    if (generation !== dashboardLoadGeneration) return data;
+    dashboardData = data;
+    window.fullData = data;
+    resetLoadedDashboardViews('overview');
+    populateGlobalFilters();
+    renderSidebar();
+    renderDashboardPayload();
+    setupComparisonControls();
+    loadAuctionSheetSettings();
+    return data;
+}
+
 function currentSelectedCampaignId() {
     const selected = document.getElementById('globalCampaignFilter')?.value || 'All';
     if (!selected || selected === 'All') return '';
@@ -805,109 +970,15 @@ function currentSelectedAdGroupFilterValue() {
 
 function currentLeadReviewAttributionForExport() {
     const current = dashboardData?.leadAttribution || {};
-    if (Array.isArray(current.filteredLeads)) return current;
-
-    const source = window.fullData?.leadAttribution || current;
-    const range = dashboardData?.meta?.dateRange || window.fullData?.meta?.dateRange || {};
-    if (Array.isArray(source.allLeads) && range.start && range.end) {
-        return filterLeadAttributionForRange(
-            source,
-            range.start,
-            range.end,
-            dashboardData?.campaigns || window.fullData?.campaigns || [],
-            currentSelectedCampaignFilterValue(),
-            currentSelectedAdGroupFilterValue()
-        );
-    }
-
     return {
-        ...source,
-        filteredLeads: Array.isArray(source.allLeads)
-            ? source.allLeads
-            : (Array.isArray(source.recentLeads) ? source.recentLeads : [])
+        ...current,
+        filteredLeads: Array.isArray(current.recentLeads) ? current.recentLeads : []
     };
 }
 
 function currentLeadReviewExportLeads() {
     const attribution = currentLeadReviewAttributionForExport();
     return Array.isArray(attribution.filteredLeads) ? attribution.filteredLeads : [];
-}
-
-function leadReviewCsvRows(leads) {
-    const headers = [
-        'First Seen',
-        'First Seen IST',
-        'Last Seen',
-        'Status',
-        'Name',
-        'Email',
-        'Phone',
-        'Campaign ID',
-        'Campaign Name',
-        'Search Term',
-        'Keyword',
-        'Match Type',
-        'UTM Source',
-        'UTM Medium',
-        'UTM Campaign',
-        'UTM Term',
-        'UTM Content',
-        'Click ID Summary',
-        'GCLID',
-        'GBRAID',
-        'WBRAID',
-        'Has Click ID',
-        'Offline Upload Ready',
-        'Lead Action Path',
-        'Event Count',
-        'Unique Action Count',
-        'Session Key',
-        'Session Key Type',
-        'Lead IDs'
-    ];
-
-    return [
-        headers,
-        ...leads.map(lead => {
-            const row = normalizedLeadViewRow(lead);
-            const attribution = lead.attribution || {};
-            return [
-                lead.firstSeen || '',
-                row.firstSeenIst || '',
-                lead.lastSeen || '',
-                leadStatusLabel(row.status, true),
-                row.name,
-                row.email,
-                row.phone,
-                row.campaignId,
-                row.campaignName,
-                row.searchTerm,
-                row.keyword,
-                row.matchType,
-                attribution.utm_source || '',
-                attribution.utm_medium || '',
-                attribution.utm_campaign || '',
-                attribution.utm_term || '',
-                attribution.utm_content || '',
-                row.clickId,
-                attribution.gclid || '',
-                attribution.gbraid || '',
-                attribution.wbraid || '',
-                lead.hasClickId ? 'Yes' : 'No',
-                lead.offlineConversionReady ? 'Yes' : 'No',
-                row.actionPathLabel,
-                lead.eventCount ?? lead.event_count ?? '',
-                lead.uniqueActionCount ?? '',
-                lead.sessionKey || '',
-                lead.sessionKeyType || '',
-                Array.isArray(lead.leadIds) ? lead.leadIds.join(' | ') : ''
-            ];
-        })
-    ];
-}
-
-function leadReviewCsvText(leads) {
-    return leadReviewCsvRows(leads).map(row => row.map(csvEscapeCell).join(',')).join('\n') + '\n';
 }
 
 function leadReviewCsvFilename() {
@@ -997,26 +1068,46 @@ function setupLeadExportControls() {
 
     const leadReviewBtn = document.getElementById('downloadLeadReviewCsvBtn');
     if (leadReviewBtn && !leadReviewBtn.hasAttribute('data-bound')) {
-        leadReviewBtn.addEventListener('click', () => {
-            const leads = currentLeadReviewExportLeads();
-            if (leads.length === 0) {
-                showToast('No lead review rows match the current date, campaign, and ad-group filters.', true);
-                updateLeadReviewCsvButton(leads);
-                return;
-            }
+        leadReviewBtn.addEventListener('click', async () => {
             const originalHtml = leadReviewBtn.innerHTML;
             leadReviewBtn.disabled = true;
             leadReviewBtn.innerHTML = '<span class="lead-export-label">Exporting...</span>';
             try {
-                downloadTextFile(leadReviewCsvFilename(), leadReviewCsvText(leads));
-                showToast(`Exported ${fmtNum(leads.length)} lead review rows.`, false);
+                const params = new URLSearchParams();
+                const range = dashboardData?.meta?.dateRange || {};
+                if (range.start) params.set('startDate', range.start);
+                if (range.end) params.set('endDate', range.end);
+                const campaignId = currentSelectedCampaignId();
+                if (campaignId) params.set('campaignId', campaignId);
+                const adGroupId = document.getElementById('globalAdGroupFilter')?.value || '';
+                if (adGroupId && adGroupId !== 'All') params.set('adGroupId', adGroupId);
+                const res = await dashboardFetch(`${API_BASE_GLOBAL}/api/leads/review.csv?${params.toString()}`);
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.error || `Lead review export failed with ${res.status}`);
+                }
+                const rows = Number(res.headers.get('X-Lead-Review-Rows') || '0');
+                if (rows === 0) {
+                    showToast('No lead review rows match the current date, campaign, and ad-group filters.', true);
+                    return;
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = leadReviewCsvFilename();
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                showToast(`Exported ${fmtNum(rows)} lead review rows.`, false);
             } catch (err) {
                 console.error(err);
                 showToast(`Lead review export failed: ${err.message}`, true);
             } finally {
                 leadReviewBtn.disabled = false;
                 leadReviewBtn.innerHTML = originalHtml;
-                updateLeadReviewCsvButton(leads);
+                updateLeadReviewCsvButton(currentLeadReviewExportLeads());
             }
         });
         leadReviewBtn.setAttribute('data-bound', 'true');
@@ -1460,7 +1551,7 @@ function setupComparisonControls() {
     // Initial sync
     syncPPRange();
 
-    function applyComparison(showSuccessToast = true) {
+    async function applyComparison(showSuccessToast = true) {
         const cp = cpPicker.data('daterangepicker');
         const pp = ppPicker.data('daterangepicker');
 
@@ -1487,40 +1578,43 @@ function setupComparisonControls() {
         const ppStartStr = pp.startDate.format('YYYY-MM-DD');
         const ppEndStr = pp.endDate.format('YYYY-MM-DD');
 
-        // Filter daily trend
-        const currentData = dailyTrend.filter(d => d.date >= cpStartStr && d.date <= cpEndStr);
-        const previousData = dailyTrend.filter(d => d.date >= ppStartStr && d.date <= ppEndStr);
-
-        const sumPeriod = (arr) => ({
-            spend: Number(arr.reduce((s, d) => s + d.spend, 0).toFixed(2)),
-            clicks: arr.reduce((s, d) => s + d.clicks, 0),
-            impressions: arr.reduce((s, d) => s + d.impressions, 0),
-            conversions: arr.reduce((s, d) => s + d.conversions, 0),
-        });
-        const sumLeads = (start, end) => {
-            const bucket = leadMetricBucket();
-            const leads = dashboardData.leadAttribution?.filteredLeads || [];
-            for (const lead of leads) {
-                const leadDate = dateKey(lead.firstSeen || lead.first_seen || lead.lastSeen || lead.last_seen);
-                if (leadDate && leadDate >= start && leadDate <= end) {
-                    bumpLeadMetricBucket(bucket, lead);
-                }
-            }
-            return {
-                realConversions: bucket.uniqueLeads,
-                realConverted: bucket.converted,
-                realQualified: bucket.qualified
-            };
-        };
-
         const safeDiv = (a, b) => b ? Number((a / b).toFixed(2)) : 0;
         const delta = (c, p) => p === 0 ? (c > 0 ? 100 : 0) : Number(((c - p) / p * 100).toFixed(1));
 
-        const curr = { ...sumPeriod(currentData), ...sumLeads(cpStartStr, cpEndStr) };
-        const prev = { ...sumPeriod(previousData), ...sumLeads(ppStartStr, ppEndStr) };
+        const comparisonSummary = (payload, label) => {
+            const summary = payload?.summary || {};
+            const leadTotals = payload?.leadAttribution?.totals || {};
+            const spend = Number(summary.spend || 0);
+            const clicks = Number(summary.clicks || 0);
+            const impressions = Number(summary.impressions || 0);
+            const conversions = Number(summary.conversions || 0);
+            return {
+                label,
+                spend,
+                clicks,
+                impressions,
+                conversions,
+                cpa: Number(summary.cpa ?? safeDiv(spend, conversions)),
+                realConversions: Number(leadTotals.uniqueLeads || 0),
+                realConverted: Number(leadTotals.converted || 0),
+                realQualified: Number(leadTotals.qualified || 0)
+            };
+        };
 
-        curr.cpa = safeDiv(curr.spend, curr.conversions);
-        prev.cpa = safeDiv(prev.spend, prev.conversions);
+        if (showSuccessToast) showToast('Loading comparison ranges...', false);
+        const [currentRes, previousRes] = await Promise.all([
+            dashboardFetch(`${API_BASE_GLOBAL}/api/dashboard${dashboardQueryString({ startDate: cpStartStr, endDate: cpEndStr, view: 'overview' })}`),
+            dashboardFetch(`${API_BASE_GLOBAL}/api/dashboard${dashboardQueryString({ startDate: ppStartStr, endDate: ppEndStr, view: 'overview' })}`)
+        ]);
+        const [currentPayload, previousPayload] = await Promise.all([
+            currentRes.json().catch(() => ({})),
+            previousRes.json().catch(() => ({}))
+        ]);
+        if (!currentRes.ok) throw new Error(currentPayload.error || currentPayload.message || `Current comparison range failed with ${currentRes.status}`);
+        if (!previousRes.ok) throw new Error(previousPayload.error || previousPayload.message || `Previous comparison range failed with ${previousRes.status}`);
+
+        const curr = comparisonSummary(currentPayload, `${cpStartStr} - ${cpEndStr}`);
+        const prev = comparisonSummary(previousPayload, `${ppStartStr} - ${ppEndStr}`);
 
         // update summary
         dashboardData.summary.spend = curr.spend;
@@ -1552,8 +1646,12 @@ function setupComparisonControls() {
         }
     }
 
-    document.getElementById('applyComparisonBtn').addEventListener('click', () => applyComparison(true));
-    applyComparison(false);
+    document.getElementById('applyComparisonBtn').addEventListener('click', () => {
+        applyComparison(true).catch(err => {
+            console.error(err);
+            showToast(`Comparison load failed: ${err.message}`, true);
+        });
+    });
 }
 
 function populateGlobalFilters() {
@@ -1561,42 +1659,43 @@ function populateGlobalFilters() {
     const adgSelect = document.getElementById('globalAdGroupFilter');
     if (!campSelect || !adgSelect || !window.fullData) return;
 
-    // Preserve existing selection
-    const currentCamp = campSelect.value;
+    const currentCamp = dashboardData?.meta?.filters?.campaignId || localStorage.getItem('globalCampaignId') || campSelect.value;
+    const currentAdG = dashboardData?.meta?.filters?.adGroupId || localStorage.getItem('globalAdGroupId') || adgSelect.value;
+    const filterOptions = window.fullData.filterOptions || {};
 
     campSelect.innerHTML = '<option value="All">All Campaigns</option>';
 
-    const campaigns = new Set();
-    (window.fullData.campaigns || []).forEach(c => {
-        if (c.campaign || c.name) campaigns.add(c.campaign || c.name);
-    });
-    Array.from(campaigns).sort().forEach(c => {
+    const campaigns = Array.isArray(filterOptions.campaigns) && filterOptions.campaigns.length
+        ? filterOptions.campaigns
+        : (window.fullData.campaigns || []).map(c => ({ id: String(c.id || c.campaignId || c.name), name: c.name || c.campaign || c.id }));
+    campaigns.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))).forEach(c => {
         const opt = document.createElement('option');
-        opt.value = c;
-        opt.textContent = c;
+        opt.value = c.id;
+        opt.textContent = c.name || c.id;
         campSelect.appendChild(opt);
     });
-    if (campaigns.has(currentCamp)) campSelect.value = currentCamp;
+    if (campaigns.some(c => c.id === currentCamp)) campSelect.value = currentCamp;
 
     window.updateAdGroupDropdown = () => {
         const selectedCamp = campSelect.value;
-        const currentAdG = adgSelect.value;
+        const selectedAdGroup = localStorage.getItem('globalAdGroupId') || adgSelect.value;
         adgSelect.innerHTML = '<option value="All">All Ad Groups</option>';
 
-        const adGroups = new Set();
-        (window.fullData.adGroups || []).forEach(a => {
-            if (selectedCamp !== 'All' && a.campaign !== selectedCamp) return;
-            if (a.adGroup || a.name) adGroups.add(a.adGroup || a.name);
-        });
-        Array.from(adGroups).sort().forEach(a => {
+        const adGroups = Array.isArray(filterOptions.adGroups) && filterOptions.adGroups.length
+            ? filterOptions.adGroups
+            : (window.fullData.adGroups || []).map(a => ({ id: String(a.id || a.adGroupId || a.name), name: a.name || a.adGroup || a.id, campaignId: String(a.campaignId || '') }));
+        const visibleAdGroups = adGroups
+            .filter(a => selectedCamp === 'All' || a.campaignId === selectedCamp)
+            .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+        visibleAdGroups.forEach(a => {
             const opt = document.createElement('option');
-            opt.value = a;
-            opt.textContent = a;
+            opt.value = a.id;
+            opt.textContent = a.name || a.id;
             adgSelect.appendChild(opt);
         });
 
-        if (adGroups.has(currentAdG)) {
-            adgSelect.value = currentAdG;
+        if (visibleAdGroups.some(a => a.id === selectedAdGroup)) {
+            adgSelect.value = selectedAdGroup;
         } else {
             adgSelect.value = 'All';
         }
@@ -1608,383 +1707,38 @@ function populateGlobalFilters() {
     // Use a flag to avoid double binding
     if (!campSelect.hasAttribute('data-bound')) {
         campSelect.addEventListener('change', () => {
+            localStorage.setItem('globalCampaignId', campSelect.value);
+            localStorage.setItem('globalAdGroupId', 'All');
             window.updateAdGroupDropdown();
-            const startD = localStorage.getItem('globalStartDate');
-            const endD = localStorage.getItem('globalEndDate');
-            if (startD && endD) applyLocalFilter(startD, endD);
+            loadDashboardForCurrentFilters('Loading selected campaign...')
+                .catch(err => {
+                    console.error(err);
+                    showToast(`Dashboard load failed: ${err.message}`, true);
+                });
         });
         campSelect.setAttribute('data-bound', 'true');
     }
 
     if (!adgSelect.hasAttribute('data-bound')) {
         adgSelect.addEventListener('change', () => {
-            const startD = localStorage.getItem('globalStartDate');
-            const endD = localStorage.getItem('globalEndDate');
-            if (startD && endD) applyLocalFilter(startD, endD);
+            localStorage.setItem('globalAdGroupId', adgSelect.value);
+            loadDashboardForCurrentFilters('Loading selected ad group...')
+                .catch(err => {
+                    console.error(err);
+                    showToast(`Dashboard load failed: ${err.message}`, true);
+                });
         });
         adgSelect.setAttribute('data-bound', 'true');
     }
 }
 
-function buildPeriodComparisonFromTrend(trendData = [], leadAttribution = {}) {
-    const rows = Array.isArray(trendData) ? trendData.slice().sort((a, b) => (a.date || '').localeCompare(b.date || '')) : [];
-    const midpoint = Math.floor(rows.length / 2);
-    const previousRows = rows.slice(0, midpoint);
-    const currentRows = rows.slice(midpoint);
-
-    const currentStartDate = currentRows[0]?.date || '';
-    const filteredLeads = leadAttribution.filteredLeads || [];
-
-    const previousLeads = currentStartDate
-        ? filteredLeads.filter(l => {
-            const d = dateKey(l.firstSeen || l.first_seen || l.lastSeen || l.last_seen);
-            return d && d < currentStartDate;
-        })
-        : [];
-
-    const currentLeads = currentStartDate
-        ? filteredLeads.filter(l => {
-            const d = dateKey(l.firstSeen || l.first_seen || l.lastSeen || l.last_seen);
-            return d && d >= currentStartDate;
-        })
-        : filteredLeads;
-
-    const sumPeriod = (arr, leads = []) => {
-        const spend = Number(arr.reduce((sum, row) => sum + Number(row.spend || 0), 0).toFixed(2));
-        const clicks = arr.reduce((sum, row) => sum + Number(row.clicks || 0), 0);
-        const impressions = arr.reduce((sum, row) => sum + Number(row.impressions || 0), 0);
-        const conversions = arr.reduce((sum, row) => sum + Number(row.conversions || 0), 0);
-
-        const leadTotals = leadMetricBucket();
-        for (const lead of leads) {
-            bumpLeadMetricBucket(leadTotals, lead);
-        }
-
-        return {
-            spend,
-            clicks,
-            impressions,
-            conversions,
-            cpa: conversions ? spend / conversions : 0,
-            realConversions: leadTotals.uniqueLeads,
-            realConverted: leadTotals.converted,
-            realQualified: leadTotals.qualified
-        };
-    };
-
-    const labelFor = arr => arr.length
-        ? `${arr[0].date || '?'} - ${arr[arr.length - 1].date || '?'}`
-        : 'No data';
-
-    const delta = (current, previous) => previous === 0 ? (current > 0 ? 100 : 0) : Number(((current - previous) / previous * 100).toFixed(1));
-
-    const previous = sumPeriod(previousRows, previousLeads);
-    const current = sumPeriod(currentRows, currentLeads);
-
-    return {
-        previousPeriod: { label: labelFor(previousRows), ...previous },
-        currentPeriod: { label: labelFor(currentRows), ...current },
-        deltas: {
-            spend: delta(current.spend, previous.spend),
-            clicks: delta(current.clicks, previous.clicks),
-            impressions: delta(current.impressions, previous.impressions),
-            conversions: delta(current.conversions, previous.conversions),
-            realConversions: delta(current.realConversions, previous.realConversions)
-        }
-    };
-}
-
-function filterAnomaliesForRange(anomalies = [], startDate, endDate) {
-    return (Array.isArray(anomalies) ? anomalies : []).filter(anomaly => {
-        const anomalyDate = dateKey(anomaly.date);
-        return !anomalyDate || (anomalyDate >= startDate && anomalyDate <= endDate);
-    });
-}
-
-function filterCandidateSignalsForRange(signals = [], startDate, endDate) {
-    return (Array.isArray(signals) ? signals : []).filter(signal => {
-        const window = signal.evidence_window || {};
-        const signalStart = dateKey(window.start);
-        const signalEnd = dateKey(window.end);
-        if (!signalStart && !signalEnd) return true;
-        return (!signalEnd || signalEnd >= startDate) && (!signalStart || signalStart <= endDate);
-    });
-}
-
-function applyLocalFilter(startDate, endDate) {
+function applyLocalFilter(_startDate, _endDate) {
     if (!window.fullData) return;
-
-    if (startDate < window.fullData.meta.dateRange.start || endDate > window.fullData.meta.dateRange.end) {
-        if (els.refreshBtn) els.refreshBtn.click();
-        return;
-    }
-
-    const selCamp = document.getElementById('globalCampaignFilter')?.value || 'All';
-    const selAdGroup = document.getElementById('globalAdGroupFilter')?.value || 'All';
-
-    const filterData = (arr, options = {}) => arr ? arr.filter(item => {
-        if (item.date && (item.date < startDate || item.date > endDate)) return false;
-        if (options.ignoreCampaignAdGroup) return true;
-
-        const itemCampaign = item.campaign ?? item.name ?? null;
-        const itemAdGroup = item.adGroup ?? (item.campaign && item.name ? item.name : null);
-        if (selCamp !== 'All' && !options.ignoreCampaign && itemCampaign !== selCamp) return false;
-        if (selAdGroup !== 'All' && !options.ignoreAdGroup && itemAdGroup !== selAdGroup) return false;
-        return true;
-    }) : [];
-
-    const agg = (filtered, type) => {
-        const agged = new Map();
-        filtered.forEach(item => {
-            let key;
-            if (type === 'campaign') key = item.id || item.campaign || item.name;
-            else if (type === 'adGroup') key = item.id || (item.campaign + '|' + item.name);
-            else if (type === 'keyword') key = item.campaign + '|' + item.adGroup + '|' + item.keyword + '|' + item.matchType;
-            else if (type === 'searchTerm') key = item.campaign + '|' + item.adGroup + '|' + item.searchTerm;
-            else if (type === 'landingPage') key = item.finalUrl;
-            else if (type === 'expandedLandingPage') key = item.expandedFinalUrl;
-            else if (type === 'date') key = item.date;
-            else key = item.name || item.device || item.day || item.id;
-
-            if (!agged.has(key)) {
-                agged.set(key, { ...item, spend: 0, clicks: 0, impressions: 0, conversions: 0, conversionsValue: 0, _rawIS: 0, _rawLostBudget: 0, _rawLostRank: 0, _rawQS: 0, _rawMobileFriendlyW: 0, _rawMobileFriendlyV: 0, _rawValidAmpW: 0, _rawValidAmpV: 0, _rawSpeedW: 0, _rawSpeedV: 0 });
-            }
-            const curr = agged.get(key);
-            curr.spend += item.spend || 0;
-            curr.clicks += item.clicks || 0;
-            curr.impressions += item.impressions || 0;
-            curr.conversions += item.conversions || 0;
-            if (item.conversionsValue) curr.conversionsValue += item.conversionsValue;
-
-            // Weighted logic for percentages
-            if (item.impressionShare !== undefined && item.impressionShare !== null) curr._rawIS += (item.impressionShare * (item.impressions || 0));
-            if (item.lostISBudget !== undefined && item.lostISBudget !== null) curr._rawLostBudget += (item.lostISBudget * (item.impressions || 0));
-            if (item.lostISRank !== undefined && item.lostISRank !== null) curr._rawLostRank += (item.lostISRank * (item.impressions || 0));
-            if (item.qualityScore !== undefined && item.qualityScore !== null) curr._rawQS += (item.qualityScore * (item.impressions || 0));
-            // Click-weighted accumulators for landing page percentage metrics
-            const w = item.clicks || 0;
-            if (item.mobileFriendlyClicksPct !== null && item.mobileFriendlyClicksPct !== undefined) { curr._rawMobileFriendlyW += w; curr._rawMobileFriendlyV += item.mobileFriendlyClicksPct * w; }
-            if (item.validAmpClicksPct !== null && item.validAmpClicksPct !== undefined) { curr._rawValidAmpW += w; curr._rawValidAmpV += item.validAmpClicksPct * w; }
-            if (item.speedScore !== null && item.speedScore !== undefined) { curr._rawSpeedW += w; curr._rawSpeedV += item.speedScore * w; }
-        });
-
-        return Array.from(agged.values()).map(item => {
-            item.ctr = item.impressions ? (item.clicks / item.impressions) * 100 : 0;
-            item.avgCpc = item.clicks ? item.spend / item.clicks : 0;
-            item.cpa = item.conversions ? item.spend / item.conversions : 0;
-            item.cvr = item.clicks ? (item.conversions / item.clicks) * 100 : 0;
-
-            if (item._rawIS > 0) item.impressionShare = item.impressions ? item._rawIS / item.impressions : 0;
-            if (item._rawLostBudget > 0) item.lostISBudget = item.impressions ? item._rawLostBudget / item.impressions : 0;
-            if (item._rawLostRank > 0) item.lostISRank = item.impressions ? item._rawLostRank / item.impressions : 0;
-            if (item._rawQS > 0) item.qualityScore = item.impressions ? item._rawQS / item.impressions : 0;
-            // Weighted pct metrics: emit null if no clicks had this data
-            item.mobileFriendlyClicksPct = item._rawMobileFriendlyW > 0 ? +(item._rawMobileFriendlyV / item._rawMobileFriendlyW).toFixed(2) : null;
-            item.validAmpClicksPct = item._rawValidAmpW > 0 ? +(item._rawValidAmpV / item._rawValidAmpW).toFixed(2) : null;
-            item.speedScore = item._rawSpeedW > 0 ? +(item._rawSpeedV / item._rawSpeedW).toFixed(2) : null;
-
-            delete item._rawIS;
-            delete item._rawLostBudget;
-            delete item._rawLostRank;
-            delete item._rawQS;
-            delete item._rawMobileFriendlyW;
-            delete item._rawMobileFriendlyV;
-            delete item._rawValidAmpW;
-            delete item._rawValidAmpV;
-            delete item._rawSpeedW;
-            delete item._rawSpeedV;
-
-            return item;
-        });
-    };
-
-    const trendData = agg(filterData(window.fullData.dailyTrend), 'date').sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    const campaignRows = filterData(window.fullData.campaigns, { ignoreAdGroup: true });
-    const campaigns = agg(campaignRows, 'campaign');
-    const dailyCampaigns = agg(campaignRows, 'date').sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    const adGroups = agg(filterData(window.fullData.adGroups), 'adGroup');
-    const rankShareEntities = selAdGroup !== 'All' ? adGroups : campaigns;
-    const rankShareDaily = agg(selAdGroup !== 'All' ? filterData(window.fullData.adGroups) : campaignRows, 'date').sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    const keywords = agg(filterData(window.fullData.keywords), 'keyword');
-    const configuredKeywords = filterData(window.fullData.configuredKeywords);
-    const negatives = filterData(window.fullData.negatives);
-    const searchTerms = agg(filterData(window.fullData.searchTerms), 'searchTerm');
-    const devicePerformance = agg(filterData(window.fullData.devicePerformance), 'device');
-    const dayOfWeekPerformance = agg(filterData(window.fullData.dayOfWeekPerformance), 'day');
-    const landingPages = agg(filterData(window.fullData.landingPages), 'landingPage');
-    const expandedLandingPages = agg(filterData(window.fullData.expandedLandingPages || []), 'expandedLandingPage');
-
-
-    const dhFiltered = filterData(window.fullData.dayAndHourPerformance);
-    const dhAgg = new Map();
-    if (dhFiltered.length) {
-        dhFiltered.forEach(item => {
-            const key = item.day + '|' + item.hour;
-            if (!dhAgg.has(key)) dhAgg.set(key, { ...item, spend: 0, clicks: 0, impressions: 0, conversions: 0 });
-            const curr = dhAgg.get(key);
-            curr.spend += item.spend || 0;
-            curr.clicks += item.clicks || 0;
-            curr.impressions += item.impressions || 0;
-            curr.conversions += item.conversions || 0;
-        });
-    }
-    const dhAggregated = Array.from(dhAgg.values()).map(item => {
-        item.ctr = item.impressions ? (item.clicks / item.impressions) * 100 : 0;
-        item.avgCpc = item.clicks ? item.spend / item.clicks : 0;
-        item.cpa = item.conversions ? item.spend / item.conversions : 0;
-        return item;
-    });
-
-    const summary = { spend: 0, clicks: 0, impressions: 0, conversions: 0 };
-    trendData.forEach(d => {
-        summary.spend += d.spend || 0;
-        summary.clicks += d.clicks || 0;
-        summary.impressions += d.impressions || 0;
-        summary.conversions += d.conversions || 0;
-    });
-    summary.ctr = summary.impressions ? (summary.clicks / summary.impressions) * 100 : 0;
-    summary.avgCpc = summary.clicks ? summary.spend / summary.clicks : 0;
-    summary.cpa = summary.conversions ? summary.spend / summary.conversions : 0;
-    summary.cvr = summary.clicks ? (summary.conversions / summary.clicks) * 100 : 0;
-
-    // Filter quality scores by campaign/adGroup (no date field — QS is a point-in-time snapshot)
-    const qualityScores = filterData(window.fullData.qualityScores);
-
-    const auctionInsights = filterData(window.fullData.auctionInsights);
-    const auctionInsightsStatus = (window.fullData.auctionInsightsStatus || []).filter(status => {
-        if (selCamp === 'All' && selAdGroup === 'All') return true;
-        if (selAdGroup !== 'All') return status.entityType === 'ad_group' && status.adGroupName === selAdGroup;
-        if (selCamp !== 'All') {
-            return (status.entityType === 'campaign' && status.campaignName === selCamp)
-                || (status.entityType === 'ad_group' && status.campaignName === selCamp);
-        }
-        return true;
-    });
-
-    // Recompute competitor breakdown from the already-filtered keywords
-    const competitorNames = (Array.isArray(window.fullData.competitorRoots) && window.fullData.competitorRoots.length)
-        ? window.fullData.competitorRoots
-        : DEFAULT_COMPETITOR_ROOTS;
-    const filteredCompetitorBreakdown = competitorNames.map(name => {
-        const rows = keywords.filter(k => (k.keyword || '').toLowerCase().includes(name));
-        const termRows = searchTerms.filter(row => keywordKey(row.searchTerm).includes(name));
-        const negativeCoverageKnown = termRows.length > 0;
-        const impressions = rows.reduce((s, r) => s + (r.impressions || 0), 0);
-        const clicks = rows.reduce((s, r) => s + (r.clicks || 0), 0);
-        const spend = +rows.reduce((s, r) => s + (r.spend || 0), 0).toFixed(2);
-        const conversions = +rows.reduce((s, r) => s + (r.conversions || 0), 0).toFixed(2);
-        const negativeCoveredSpend = +termRows.filter(row => rowNegativeCoverage(row).isNegativeCovered).reduce((s, r) => s + (r.spend || 0), 0).toFixed(2);
-        const searchSpend = +termRows.reduce((s, r) => s + (r.spend || 0), 0).toFixed(2);
-        const searchConversions = +termRows.reduce((s, r) => s + (r.conversions || 0), 0).toFixed(2);
-        const leadQuality = aggregateLeadQuality(termRows);
-        const negativeUncoveredSpend = negativeCoverageKnown ? +Math.max(searchSpend - negativeCoveredSpend, 0).toFixed(2) : null;
-        const isRows = rows.filter(r => r.impressionShare != null);
-        const impressionShare = isRows.length
-            ? +(isRows.reduce((s, r) => s + (r.impressionShare || 0), 0) / isRows.length).toFixed(2)
-            : null;
-        return {
-            competitor: name, spend, clicks, impressions, conversions,
-            cpa: conversions > 0 ? +(spend / conversions).toFixed(2) : 0,
-            ctr: impressions > 0 ? +(clicks / impressions * 100).toFixed(2) : 0,
-            impressionShare,
-            searchTermSpend: searchSpend,
-            searchTermConversions: searchConversions,
-            negativeCoverageKnown,
-            negativeCoveredSpend,
-            negativeUncoveredSpend,
-            negativeCoverageSources: Array.from(new Set(termRows.filter(row => rowNegativeCoverage(row).isNegativeCovered).map(row => rowNegativeCoverage(row).negativeCoverageSource).filter(Boolean))),
-            qualityScore: (qualityScores || []).find(q =>
-                (q.keyword || '').toLowerCase().includes(name))?.qualityScore || null,
-            competitorLeadQuality: leadQuality,
-            leadQuality,
-            leadQualityStatus: leadQuality?.tone || 'missing',
-            realLeadCount: leadQuality?.uniqueLeads || 0,
-            uselessLeads: leadQuality?.useless || 0,
-            qualifiedOrConvertedLeads: leadQuality?.qualifiedOrConverted || 0
-        };
-    });
-
-    // Recompute insights.constraints from filtered campaigns
-    const filteredInsights = {
-        ...(window.fullData.insights || {}),
-        constraints: campaigns.map(c => ({
-            campaign: c.name,
-            impressionShare: c.impressionShare,
-            lostISBudget: c.lostISBudget,
-            lostISRank: c.lostISRank,
-        }))
-    };
-    const leadAttribution = filterLeadAttributionForRange(
-        window.fullData.leadAttribution || {},
-        startDate,
-        endDate,
-        campaigns,
-        selCamp,
-        selAdGroup
-    );
-    const periodComparison = buildPeriodComparisonFromTrend(trendData, leadAttribution);
-    const anomalies = filterAnomaliesForRange(window.fullData.anomalies || [], startDate, endDate);
-    const candidateSignals = filterCandidateSignalsForRange(window.fullData.candidateSignals || [], startDate, endDate);
-
-    dashboardData = {
-        ...window.fullData,
-        summary,
-        periodComparison,
-        anomalies,
-        globalSummary: JSON.parse(JSON.stringify(summary)),
-        dailyTrend: trendData,
-        campaigns,
-        dailyCampaigns,
-        adGroups,
-        keywords,
-        configuredKeywords,
-        negatives,
-        searchTerms,
-        devicePerformance,
-        dayOfWeekPerformance,
-        dayAndHourPerformance: dhAggregated,
-        landingPages,
-        expandedLandingPages,
-
-        rankShareEntities,
-        dailyRankShare: rankShareDaily,
-        conversionActions: agg(filterData(window.fullData.conversionActions), 'name'),
-        conversionAttribution: filterData(window.fullData.conversionAttribution),
-        clickPaths: filterData(window.fullData.clickPaths),
-        qualityScores,
-        auctionInsights,
-        auctionInsightsStatus,
-        keywordPlanner: window.fullData.keywordPlanner || { ideas: [], historicalMetrics: [], status: { status: 'empty', message: 'Keyword Planner has not run yet.' } },
-        competitorBreakdown: filteredCompetitorBreakdown,
-        insights: filteredInsights,
-        leadAttribution,
-        candidateSignals,
-    };
-
-    if (dashboardData.meta) {
-        dashboardData.meta.dateRange = { start: startDate, end: endDate };
-    }
-
-    renderGlobalKPIs();
-    renderLeadFunnel();
-    renderKPIs();
-    renderCharts();
-    renderInsights();
-    renderTables();
-    renderKeywordPlannerExplorer();
-    renderKeywordDiscoveryContext();
-    renderAttribution();
-    renderRankDiagnostics();
-    renderCompetitorWaste();
-    renderCandidateSignals();
-    renderProposals();
-    animateKPIs();
-
-    if (els.dateRange) els.dateRange.textContent = formatDateRange(startDate + ' - ' + endDate);
+    renderDashboardPayload();
 }
 
 function renderGlobalKPIs() {
-    const summary = dashboardData.globalSummary;
+    const summary = dashboardData.summary || dashboardData.globalSummary || {};
     const globalKpiGrid = document.getElementById('globalKpiGrid');
     if (!globalKpiGrid) return;
 
@@ -2028,7 +1782,7 @@ function renderGlobalKPIs() {
         const isClicksToday = kpi.label === 'Clicks Today';
         const kpiCardClass = isClicksToday ? 'card glass-card kpi-card overall-clicks-card' : 'card glass-card kpi-card';
         const onclickAttr = isClicksToday ? 'onclick="openClicksModal()"' : '';
-        const labelText = isClicksToday ? 'Clicks Today' : `Overall ${kpi.label}`;
+        const labelText = isClicksToday ? 'Clicks Today' : kpi.label;
 
         return `
             <div class="${kpiCardClass}" style="${bg} ${border}" ${onclickAttr}>
@@ -2183,14 +1937,9 @@ Chart.defaults.borderColor = 'rgba(0, 0, 0, 0.05)';
 function renderCharts() {
     renderComparisonChart();
     renderTrendChart();
-    renderSankeyChart();
     if (dashboardData.devicePerformance) renderDeviceChart();
     renderTimePerformance();
-    if (dashboardData.campaigns) renderCampaignBubbleChart();
-    if (dashboardData.keywords) renderKeywordScatterChart();
-    if (dashboardData.qualityScores) renderQsDoughnutChart();
-    if (dashboardData.campaigns) renderImpressionShareChart();
-    if (dashboardData.dailyCampaigns && dashboardData.dailyCampaigns.length > 0) renderImpressionShareOverTimeChart();
+    renderSankeyChart();
 }
 
 function renderComparisonChart() {
@@ -3154,8 +2903,12 @@ function renderKeywordDiscoveryContext() {
 }
 
 function renderTables() {
+    const tabId = activeDashboardTab();
+    const shouldRenderPerformance = tabId === 'campaigns' || tabId === 'ad-groups';
+    const shouldRenderKeywords = tabId === 'keywords';
+
     // Ad Groups
-    if (dashboardData.adGroups) {
+    if (shouldRenderPerformance && dashboardData.adGroups) {
         initGrid('grid-adGroups', dashboardData.adGroups, [
             { field: 'name', headerName: 'Ad Group', pinned: 'left' },
             { field: 'campaign', headerName: 'Campaign' },
@@ -3172,20 +2925,24 @@ function renderTables() {
     }
 
     // Campaigns
-    initGrid('grid-campaigns', dashboardData.campaigns, [
-        { field: 'name', headerName: 'Campaign', pinned: 'left' },
-        { field: 'status', headerName: 'Status' },
-        { field: 'spend', headerName: 'Spend', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'impressions', headerName: 'Impr.', filter: 'agNumberColumnFilter' },
-        { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
-        { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
-        { field: 'cpa', headerName: 'CPA', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'lostISBudget', headerName: 'Lost IS (Budget)', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'lostISRank', headerName: 'Lost IS (Rank)', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' }
-    ]);
+    if (shouldRenderPerformance && dashboardData.campaigns) {
+        initGrid('grid-campaigns', dashboardData.campaigns, [
+            { field: 'name', headerName: 'Campaign', pinned: 'left' },
+            { field: 'status', headerName: 'Status' },
+            { field: 'spend', headerName: 'Spend', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'impressions', headerName: 'Impr.', filter: 'agNumberColumnFilter' },
+            { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
+            { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
+            { field: 'cpa', headerName: 'CPA', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'lostISBudget', headerName: 'Lost IS (Budget)', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'lostISRank', headerName: 'Lost IS (Rank)', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' }
+        ]);
+    }
+
+    if (!shouldRenderKeywords) return;
 
     // Keywords (Configured)
     if (dashboardData.configuredKeywords) {
@@ -3283,30 +3040,32 @@ function renderTables() {
     }
 
     // Keywords (Performance)
-    initGrid('grid-keywords', dashboardData.keywords, [
-        { field: 'keyword', headerName: 'Keyword', pinned: 'left', minWidth: 150 },
-        { field: 'status', headerName: 'Status', valueFormatter: p => p.value === 'ENABLED' ? '🟢' : p.value === 'PAUSED' ? '⏸️' : '❌' },
-        { field: 'matchType', headerName: 'Match' },
-        { field: 'campaign', headerName: 'Campaign' },
-        { field: 'adGroup', headerName: 'Ad Group' },
-        { field: 'configuredKeywordStatus', headerName: 'Configured Status' },
-        { field: 'negativeCoverageKeyword', headerName: 'Negative Cover' },
-        { field: 'spend', headerName: 'Spend', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'impressions', headerName: 'Impr.', filter: 'agNumberColumnFilter' },
-        { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
-        { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
-        { field: 'cpa', headerName: 'CPA', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'impressionShare', headerName: 'Impr. Share', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'avgMonthlySearches', headerName: 'AMS', valueFormatter: nullableNumberFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'competition', headerName: 'Competition', valueFormatter: plannerStatusFormatter },
-        { field: 'lowBid', headerName: 'Low Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'highBid', headerName: 'High Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
-        { field: 'plannerScore', headerName: 'Planner Score', filter: 'agNumberColumnFilter', sort: 'desc' },
-        { field: 'label', headerName: 'Suggestion' }
-    ]);
+    if (dashboardData.keywords) {
+        initGrid('grid-keywords', dashboardData.keywords, [
+            { field: 'keyword', headerName: 'Keyword', pinned: 'left', minWidth: 150 },
+            { field: 'status', headerName: 'Status', valueFormatter: p => p.value === 'ENABLED' ? '🟢' : p.value === 'PAUSED' ? '⏸️' : '❌' },
+            { field: 'matchType', headerName: 'Match' },
+            { field: 'campaign', headerName: 'Campaign' },
+            { field: 'adGroup', headerName: 'Ad Group' },
+            { field: 'configuredKeywordStatus', headerName: 'Configured Status' },
+            { field: 'negativeCoverageKeyword', headerName: 'Negative Cover' },
+            { field: 'spend', headerName: 'Spend', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'impressions', headerName: 'Impr.', filter: 'agNumberColumnFilter' },
+            { field: 'clicks', headerName: 'Clicks', filter: 'agNumberColumnFilter' },
+            { field: 'ctr', headerName: 'CTR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'avgCpc', headerName: 'Avg CPC', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'conversions', headerName: 'Conv.', filter: 'agNumberColumnFilter' },
+            { field: 'cpa', headerName: 'CPA', valueFormatter: currencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'cvr', headerName: 'CVR', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'impressionShare', headerName: 'Impr. Share', valueFormatter: pctFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'avgMonthlySearches', headerName: 'AMS', valueFormatter: nullableNumberFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'competition', headerName: 'Competition', valueFormatter: plannerStatusFormatter },
+            { field: 'lowBid', headerName: 'Low Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'highBid', headerName: 'High Bid', valueFormatter: nullableCurrencyFormatter, filter: 'agNumberColumnFilter' },
+            { field: 'plannerScore', headerName: 'Planner Score', filter: 'agNumberColumnFilter', sort: 'desc' },
+            { field: 'label', headerName: 'Suggestion' }
+        ]);
+    }
 
     // Negative Keywords
     if (dashboardData.negatives) {
@@ -3326,7 +3085,7 @@ function renderTables() {
     }
 
     // Search Terms
-    initGrid('grid-searchTerms', dashboardData.searchTerms, [
+    if (dashboardData.searchTerms) initGrid('grid-searchTerms', dashboardData.searchTerms, [
         { field: 'searchTerm', headerName: 'Search Term', pinned: 'left', minWidth: 180, wrapText: true, autoHeight: true },
         {
             field: 'matchedKeyword',
@@ -3347,7 +3106,7 @@ function renderTables() {
         {
             field: 'searchTermMatchSource',
             headerName: 'Match Source',
-            headerTooltip: 'How Google matched this search term to your campaign. Examples: ADVERTISER_KEYWORD (your keyword triggered it), DSA (Dynamic Search Ads), SMART_CAMPAIGN, PERFORMANCE_MAX, AI_MAX, VERTICAL_FEED. This is a read-only Google Ads field.',
+            headerTooltip: 'How Google matched this search term to your campaign. Examples: ADVERTISER_PROVIDED_KEYWORD, DYNAMIC_SEARCH_ADS, PERFORMANCE_MAX, AI_MAX_BROAD_MATCH, and AI_MAX_KEYWORDLESS. This is a read-only Google Ads field.',
             valueFormatter: p => p.value ? String(p.value).replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'n/a'
         },
         { field: 'status', headerName: 'Status' },
@@ -3534,6 +3293,7 @@ function normalizedLeadViewRow(lead) {
             matchType: attribution.match_type || '',
             campaignName: campaign.campaignName || '',
             campaignId: campaign.campaignId || attribution.utm_campaign || '',
+            utmCampaign: campaign.utmCampaign || attribution.utm_campaign || '',
             clickId: clickIdSummary(attribution),
             clickIdReady: Boolean(lead.hasClickId),
             offlineReadyLabel: lead.offlineConversionReady ? 'Ready for offline upload' : 'Not uploadable yet',
@@ -3596,7 +3356,8 @@ function renderLeadCampaignCell(lead) {
             ? `Campaign: ${lead.campaignName || lead.campaignId}`
             : 'Campaign unavailable'
     ];
-    if (lead.campaignName && lead.campaignId) rows.push(`UTM campaign: ${lead.campaignId}`);
+    if (lead.utmCampaign && lead.utmCampaign !== lead.campaignId) rows.push(`UTM campaign: ${lead.utmCampaign}`);
+    else if (lead.campaignName && lead.campaignId) rows.push(`Campaign ID: ${lead.campaignId}`);
     return `
         <div class="lead-source-cell">
             ${rows.map((row, index) => index === 0
@@ -3628,312 +3389,6 @@ function renderLeadStatusCell(lead) {
             `).join('')}
         </select>
     `;
-}
-
-function leadMetricBucket(extra = {}) {
-    return {
-        uniqueLeads: 0,
-        eventCount: 0,
-        new: 0,
-        useless: 0,
-        qualified: 0,
-        qualifiedLost: 0,
-        converted: 0,
-        inProgress: 0,
-        terminal: 0,
-        qualifiedPipeline: 0,
-        qualifiedOrConverted: 0,
-        ...extra
-    };
-}
-
-function bumpLeadMetricBucket(bucket, lead) {
-    const status = normalizeLeadStatus(lead.status);
-    bucket.uniqueLeads += 1;
-    bucket.eventCount += Number(lead.eventCount ?? lead.event_count ?? 0);
-    if (status === 'new') bucket.new += 1;
-    if (status === 'useless') bucket.useless += 1;
-    if (status === 'qualified') bucket.qualified += 1;
-    if (status === 'qualified_lost') bucket.qualifiedLost += 1;
-    if (status === 'converted') bucket.converted += 1;
-    if (status === 'qualified') bucket.inProgress += 1;
-    if (['converted', 'qualified_lost', 'useless'].includes(status)) bucket.terminal += 1;
-    if (['qualified', 'converted', 'qualified_lost'].includes(status)) bucket.qualifiedPipeline += 1;
-    if (['qualified', 'converted'].includes(status)) bucket.qualifiedOrConverted += 1;
-}
-
-function dateKey(value) {
-    if (!value) return '';
-    const text = String(value);
-    if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
-    const parsed = new Date(text);
-    return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
-}
-
-function campaignLookupFromRows(rows = []) {
-    const out = new Map();
-    for (const row of rows || []) {
-        const campaignId = String(row.id || row.campaignId || '').trim();
-        if (!campaignId) continue;
-        const current = out.get(campaignId) || {
-            campaignId,
-            campaignName: row.name || row.campaignName || row.campaign || null,
-            spend: 0
-        };
-        current.spend += Number(row.spend || 0);
-        if (!current.campaignName && (row.name || row.campaignName || row.campaign)) {
-            current.campaignName = row.name || row.campaignName || row.campaign;
-        }
-        out.set(campaignId, current);
-    }
-    return out;
-}
-
-function leadCampaignInfo(lead, campaignLookup) {
-    const attribution = lead.attribution || {};
-    const existing = lead.campaign || {};
-    const campaignId = existing.campaignId || attribution.utm_campaign || '';
-    const matched = campaignId ? campaignLookup.get(campaignId) : null;
-    return {
-        campaignId,
-        campaignName: existing.campaignName || matched?.campaignName || null,
-        spend: matched?.spend || 0
-    };
-}
-
-function leadMatchesSelectedCampaign(lead, campaignInfo, selectedCampaign) {
-    if (!selectedCampaign || selectedCampaign === 'All') return true;
-    return campaignInfo.campaignName === selectedCampaign
-        || campaignInfo.campaignId === selectedCampaign
-        || lead.attribution?.utm_campaign === selectedCampaign;
-}
-
-function normalizedAdGroupCandidate(value) {
-    if (value && typeof value === 'object') {
-        return normalizedAdGroupCandidate(value.name || value.adGroup || value.adGroupName || value.ad_group || value.ad_group_name);
-    }
-    const text = String(value || '').trim().toLowerCase();
-    return text || null;
-}
-
-function leadAdGroupCandidates(lead) {
-    const attribution = lead.attribution || {};
-    return [
-        attribution.ad_group,
-        attribution.adGroup,
-        attribution.ad_group_name,
-        attribution.adGroupName,
-        attribution.google_ad_group,
-        attribution.googleAdGroup,
-        lead.adGroup,
-        lead.ad_group,
-        lead.adGroupName,
-        lead.ad_group_name,
-        lead.campaign?.adGroup,
-        lead.campaign?.adGroupName
-    ].map(normalizedAdGroupCandidate).filter(Boolean);
-}
-
-function leadMatchesSelectedAdGroup(lead, selectedAdGroup) {
-    if (!selectedAdGroup || selectedAdGroup === 'All') return true;
-
-    const candidates = leadAdGroupCandidates(lead);
-    if (candidates.length === 0) return true;
-    return candidates.includes(selectedAdGroup.toLowerCase());
-}
-
-
-function buildLeadJourneySummaryFromRows(leads) {
-    const actionTotals = new Map();
-    const pairTotals = new Map();
-    const pathTotals = new Map();
-    const flowEdgeTotals = new Map();
-    const pathStatusTotals = new Map();
-    const journeyRows = [];
-
-    for (const lead of leads) {
-        const rawPath = String(lead.actionPath || '').trim();
-        const actions = rawPath && rawPath !== '(no action kind)'
-            ? rawPath.split(' -> ').map(action => action.trim()).filter(Boolean)
-            : [];
-        const uniqueActions = Array.from(new Set(actions));
-        for (const action of uniqueActions) actionTotals.set(action, (actionTotals.get(action) || 0) + 1);
-        for (let i = 0; i < uniqueActions.length; i++) {
-            for (let j = i + 1; j < uniqueActions.length; j++) {
-                const from = uniqueActions[i];
-                const to = uniqueActions[j];
-                const key = `${from} -> ${to}`;
-                const bucket = pairTotals.get(key) || { from, to, sessions: 0 };
-                bucket.sessions += 1;
-                pairTotals.set(key, bucket);
-            }
-        }
-        const path = actions.length ? actions.join(' -> ') : '(no action kind)';
-        pathTotals.set(path, (pathTotals.get(path) || 0) + 1);
-        const status = normalizeLeadStatus(lead.status);
-        const flowNodes = ['Session start', ...actions, `Outcome: ${status.replace(/_/g, ' ')}`];
-        for (let i = 0; i < flowNodes.length - 1; i++) {
-            const from = flowNodes[i];
-            const to = flowNodes[i + 1];
-            const key = `${from} -> ${to}`;
-            const bucket = flowEdgeTotals.get(key) || { from, to, sessions: 0 };
-            bucket.sessions += 1;
-            flowEdgeTotals.set(key, bucket);
-        }
-        const pathStatusKey = `${path}|${status}`;
-        const pathStatusBucket = pathStatusTotals.get(pathStatusKey) || { path, status, sessions: 0 };
-        pathStatusBucket.sessions += 1;
-        pathStatusTotals.set(pathStatusKey, pathStatusBucket);
-        journeyRows.push({
-            sessionKey: lead.sessionKey,
-            status,
-            actionCount: actions.length,
-            uniqueActionCount: uniqueActions.length,
-            actionPath: path,
-            firstSeen: lead.firstSeen,
-            lastSeen: lead.lastSeen
-        });
-    }
-
-    const totalSessions = leads.length || 1;
-    return {
-        totalSessions: leads.length,
-        sessionsWithMultipleActions: journeyRows.filter(row => row.uniqueActionCount > 1).length,
-        topActionOverlaps: Array.from(pairTotals.values())
-            .map(pair => ({
-                ...pair,
-                percentOfFrom: Number(((pair.sessions / Math.max(actionTotals.get(pair.from) || 0, 1)) * 100).toFixed(2)),
-                percentOfAll: Number(((pair.sessions / totalSessions) * 100).toFixed(2))
-            }))
-            .sort((a, b) => b.sessions - a.sessions || b.percentOfFrom - a.percentOfFrom)
-            .slice(0, 50),
-        topPaths: Array.from(pathTotals.entries())
-            .map(([path, sessions]) => ({
-                path,
-                sessions,
-                percentOfAll: Number(((sessions / totalSessions) * 100).toFixed(2))
-            }))
-            .sort((a, b) => b.sessions - a.sessions)
-            .slice(0, 50),
-        flowEdges: Array.from(flowEdgeTotals.values())
-            .map(edge => ({
-                ...edge,
-                percentOfAll: Number(((edge.sessions / totalSessions) * 100).toFixed(2))
-            }))
-            .sort((a, b) => b.sessions - a.sessions)
-            .slice(0, 120),
-        pathOutcomes: Array.from(pathStatusTotals.values())
-            .map(row => ({
-                ...row,
-                percentOfAll: Number(((row.sessions / totalSessions) * 100).toFixed(2))
-            }))
-            .sort((a, b) => b.sessions - a.sessions)
-            .slice(0, 100),
-        recentJourneys: journeyRows.slice(0, 50)
-    };
-}
-
-function buildOfflineExportReadinessFromRows(leads) {
-    let readyRows = 0;
-    let skippedMissingClickId = 0;
-    let qualifiedOrConverted = 0;
-    let needsReview = 0;
-    for (const lead of leads) {
-        const status = normalizeLeadStatus(lead.status);
-        if (status === 'new') needsReview += 1;
-        if (!['qualified', 'converted'].includes(status)) continue;
-        qualifiedOrConverted += 1;
-        if (lead.hasClickId) readyRows += 1;
-        else skippedMissingClickId += 1;
-    }
-    return {
-        statuses: ['qualified', 'converted'],
-        readyRows,
-        skippedMissingClickId,
-        qualifiedOrConverted,
-        needsReview
-    };
-}
-
-function filterLeadAttributionForRange(source = {}, startDate, endDate, campaignRows = [], selectedCampaign = 'All', selectedAdGroup = 'All') {
-    const allLeads = Array.isArray(source.allLeads)
-        ? source.allLeads
-        : (Array.isArray(source.recentLeads) ? source.recentLeads : []);
-    const campaignLookup = campaignLookupFromRows(campaignRows);
-    const filteredLeads = allLeads
-        .filter(lead => {
-            const leadDate = dateKey(lead.firstSeen || lead.first_seen || lead.lastSeen || lead.last_seen);
-            if (!leadDate || leadDate < startDate || leadDate > endDate) return false;
-            const campaignInfo = leadCampaignInfo(lead, campaignLookup);
-            if (!leadMatchesSelectedCampaign(lead, campaignInfo, selectedCampaign)) return false;
-            return leadMatchesSelectedAdGroup(lead, selectedAdGroup);
-        })
-        .map(lead => {
-            const campaignInfo = leadCampaignInfo(lead, campaignLookup);
-            return {
-                ...lead,
-                status: normalizeLeadStatus(lead.status),
-                campaign: campaignInfo.campaignId ? {
-                    campaignId: campaignInfo.campaignId,
-                    campaignName: campaignInfo.campaignName
-                } : null
-            };
-        });
-
-    const totals = leadMetricBucket();
-    const byCampaign = new Map();
-    const bySearchTerm = new Map();
-    for (const lead of filteredLeads) {
-        bumpLeadMetricBucket(totals, lead);
-        const attribution = lead.attribution || {};
-        const campaignInfo = leadCampaignInfo(lead, campaignLookup);
-        const campaignId = campaignInfo.campaignId || '(none)';
-        const campaignBucket = byCampaign.get(campaignId) || leadMetricBucket({
-            campaignId,
-            campaignName: campaignInfo.campaignName,
-            spend: campaignInfo.spend,
-            trueCpa: 0,
-            qualifiedCpa: 0,
-            convertedCpa: 0,
-            customerCpa: 0
-        });
-        bumpLeadMetricBucket(campaignBucket, lead);
-        byCampaign.set(campaignId, campaignBucket);
-
-        const term = attribution.utm_term || attribution.keyword || '(none)';
-        const termBucket = bySearchTerm.get(term) || leadMetricBucket({
-            searchTerm: term,
-            keyword: attribution.keyword || '',
-            matchType: attribution.match_type || ''
-        });
-        if (!termBucket.keyword && attribution.keyword) termBucket.keyword = attribution.keyword;
-        if (!termBucket.matchType && attribution.match_type) termBucket.matchType = attribution.match_type;
-        bumpLeadMetricBucket(termBucket, lead);
-        bySearchTerm.set(term, termBucket);
-    }
-
-    const campaignBuckets = Array.from(byCampaign.values())
-        .map(bucket => ({
-            ...bucket,
-            trueCpa: bucket.uniqueLeads > 0 ? bucket.spend / bucket.uniqueLeads : 0,
-            qualifiedCpa: bucket.qualifiedPipeline > 0 ? bucket.spend / bucket.qualifiedPipeline : 0,
-            convertedCpa: bucket.converted > 0 ? bucket.spend / bucket.converted : 0,
-            customerCpa: bucket.converted > 0 ? bucket.spend / bucket.converted : 0
-        }))
-        .sort((a, b) => b.spend - a.spend || b.uniqueLeads - a.uniqueLeads);
-
-    return {
-        ...source,
-        dateRange: { start: startDate, end: endDate },
-        totals,
-        byCampaign: campaignBuckets,
-        bySearchTerm: Array.from(bySearchTerm.values()).sort((a, b) => b.uniqueLeads - a.uniqueLeads).slice(0, 100),
-        journeySummary: buildLeadJourneySummaryFromRows(filteredLeads),
-        allLeads,
-        recentLeads: filteredLeads.slice(0, 50),
-        filteredLeads: filteredLeads,
-        offlineExport: buildOfflineExportReadinessFromRows(filteredLeads)
-    };
 }
 
 function exportReadinessMessage(readiness = {}) {
@@ -4246,15 +3701,18 @@ window.updateLeadStatus = async function (sessionKey, status) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || `Lead update failed with ${res.status}`);
 
-        const dashboardRes = await dashboardFetch(`${API_BASE_GLOBAL}/api/dashboard`);
-        const dashboard = await dashboardRes.json().catch(() => ({}));
-        if (!dashboardRes.ok) throw new Error(dashboard.error || `Dashboard reload failed with ${dashboardRes.status}`);
-        if (dashboardData) dashboardData.leadAttribution = dashboard.leadAttribution || {};
-        if (window.fullData) window.fullData.leadAttribution = dashboard.leadAttribution || {};
-        const startD = localStorage.getItem('globalStartDate') || dashboardData?.meta?.dateRange?.start;
-        const endD = localStorage.getItem('globalEndDate') || dashboardData?.meta?.dateRange?.end;
-        if (startD && endD && window.fullData) applyLocalFilter(startD, endD);
-        else renderAttribution();
+        const generation = beginDashboardLoad();
+        const dashboard = await fetchDashboardView('overview');
+        if (generation !== dashboardLoadGeneration) return;
+        dashboardData = dashboard;
+        window.fullData = dashboard;
+        resetLoadedDashboardViews('overview');
+        const tabId = activeDashboardTab();
+        if (dashboardViewForTab(tabId) !== 'overview') {
+            await ensureDashboardViewForTab(tabId, { render: false });
+        }
+        populateGlobalFilters();
+        renderDashboardPayload();
         showToast(`Lead marked as ${label}.`, false);
     } catch (err) {
         console.error(err);
@@ -5403,7 +4861,7 @@ function renderCompetitorWaste() {
         : '';
 
     // First-party webhook lead integration (deduped sessions from lead_sessions table)
-    const leadRows = dashboardData.leadAttribution?.filteredLeads || dashboardData.leadAttribution?.allLeads || [];
+    const leadRows = dashboardData.leadAttribution?.recentLeads || [];
     const webhookLeads = leadRows.filter(lead => {
         const term = String(lead.attribution?.keyword || lead.attribution?.utm_term || '').toLowerCase();
         const competitorRoots = (Array.isArray(dashboardData.competitorRoots) && dashboardData.competitorRoots.length)

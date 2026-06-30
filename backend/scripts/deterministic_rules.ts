@@ -1,11 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import * as fs from 'fs';
-import * as path from 'path';
 import crypto from 'crypto';
 import { Pool } from 'pg';
 import { ensureLeadSchema } from '../lib/leads';
+import { ensureDatabaseSchema } from '../lib/proposals';
 import { cpaBenchmarkForAccount, currencyCodeFromAccountRow } from '../lib/accountBenchmarks';
 import { COMPETITOR_ROOTS } from '../lib/competitors';
 import { DECISION_SOURCE_STATUS_REPORTS, classifyDataCoverageGaps, type DataCoverageSourceStatus } from '../lib/dataCoverageRisk';
@@ -20,11 +19,18 @@ import {
     type TermScope
 } from '../lib/decisionContext';
 import { plannerFields, plannerNumber } from '../lib/plannerScoring';
-import { sourceEntry } from '../lib/sourceCoverage';
-
-const ROOT = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(ROOT, 'data', 'latest');
-const OUT_FILE = path.join(DATA_DIR, 'deterministic_insights.json');
+import { resolveDashboardFilters } from '../lib/dashboardPayload';
+import {
+    completeWarehouseRefreshRun,
+    ensureAdsWarehouseSchema,
+    getDashboardReportBundle,
+    replaceCandidateSignals,
+    startWarehouseRefreshRun,
+    type CandidateSignalRow,
+    type CoverageEntry,
+    type DashboardFilters,
+    type DashboardReportBundle
+} from '../lib/adsWarehouse';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'watchlist';
 
@@ -115,16 +121,11 @@ function normalizeData(flatData: any[]): any[] {
     });
 }
 
+const rawReportCache = new Map<string, any[]>();
+const sourceStatusCache = new Map<string, DataCoverageSourceStatus>();
+
 function readReport(name: string): any[] {
-    const file = path.join(DATA_DIR, `${name}.json`);
-    if (!fs.existsSync(file)) return [];
-    try {
-        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return normalizeData(Array.isArray(raw) ? raw : []);
-    } catch (err) {
-        console.warn(`Could not read ${name}:`, err);
-        return [];
-    }
+    return normalizeData(rawReportCache.get(name) || []);
 }
 
 function moneyMicros(value: any): number {
@@ -299,6 +300,8 @@ interface LeadQualityMaps {
     byCampaign: Map<string, LeadQualityBucket>;
     bySearchTerm: Map<string, LeadQualityBucket>;
     bySemanticRoot: Map<string, SemanticRootBucket>;
+    campaignAliases: Map<string, string>;
+    campaignScopedTerms: Map<string, Set<string>>;
 }
 
 interface DecisionSources {
@@ -331,29 +334,66 @@ function termScope(customerId: string | null, campaignId: any, campaignName: any
 }
 
 function rawJsonReport(name: string): any[] {
-    const file = path.join(DATA_DIR, `${name}.json`);
-    if (!fs.existsSync(file)) return [];
-    try {
-        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return Array.isArray(raw) ? raw : [];
-    } catch {
-        return [];
-    }
+    return rawReportCache.get(name) || [];
 }
 
 function reportStatus(name: string): DataCoverageSourceStatus {
-    const entry = sourceEntry(DATA_DIR, name, `${name}.json`);
-    return {
-        name,
-        status: entry.status,
-        rows: entry.rows ?? 0,
-        ageHours: entry.ageHours ?? null,
-        message: entry.message ?? null
-    };
+    return sourceStatusCache.get(name) || { name, status: 'missing', rows: 0, ageHours: null, message: null };
 }
 
 function emptyLeadQualityMaps(): LeadQualityMaps {
-    return { hasLeadData: false, byCampaign: new Map(), bySearchTerm: new Map(), bySemanticRoot: new Map() };
+    return {
+        hasLeadData: false,
+        byCampaign: new Map(),
+        bySearchTerm: new Map(),
+        bySemanticRoot: new Map(),
+        campaignAliases: new Map(),
+        campaignScopedTerms: new Map()
+    };
+}
+
+function campaignAliasKey(value: any): string {
+    return norm(value);
+}
+
+function buildCampaignAliasLookup(campaignRows: any[]): Map<string, string> {
+    const aliasToIds = new Map<string, Set<string>>();
+    for (const row of campaignRows) {
+        const campaign = row?.campaign || {};
+        const id = campaignAliasKey(campaign.id || row?.campaignId || row?.campaign_id);
+        if (!id) continue;
+        const aliases = [
+            id,
+            campaign.name,
+            row?.campaignName,
+            row?.campaign_name,
+            row?.name
+        ].map(campaignAliasKey).filter(Boolean);
+        for (const alias of aliases) {
+            const ids = aliasToIds.get(alias) || new Set<string>();
+            ids.add(id);
+            aliasToIds.set(alias, ids);
+        }
+    }
+
+    const out = new Map<string, string>();
+    for (const [alias, ids] of aliasToIds) {
+        if (ids.size !== 1) continue;
+        out.set(alias, Array.from(ids)[0]);
+    }
+    return out;
+}
+
+function canonicalCampaignKey(value: any, aliases: Map<string, string>): string {
+    const key = campaignAliasKey(value);
+    return aliases.get(key) || key;
+}
+
+function addScopedTerm(maps: LeadQualityMaps, campaignId: string, searchTerm: string): void {
+    if (!campaignId || !searchTerm) return;
+    const campaigns = maps.campaignScopedTerms.get(searchTerm) || new Set<string>();
+    campaigns.add(campaignId);
+    maps.campaignScopedTerms.set(searchTerm, campaigns);
 }
 
 function bumpLeadBucket(map: Map<string, LeadQualityBucket>, key: string, row: any): void {
@@ -414,9 +454,9 @@ function bumpSemanticRoot(map: Map<string, SemanticRootBucket>, root: string, ro
     map.set(root, bucket);
 }
 
-async function buildLeadQualityMaps(): Promise<LeadQualityMaps> {
+async function buildLeadQualityMaps(existingPool?: Pool, campaignRows: any[] = readReport('campaign-performance')): Promise<LeadQualityMaps> {
     if (!process.env.DATABASE_URL) return emptyLeadQualityMaps();
-    const pool = new Pool({
+    const pool = existingPool || new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
         connectionTimeoutMillis: 3000
@@ -429,13 +469,17 @@ async function buildLeadQualityMaps(): Promise<LeadQualityMaps> {
              ORDER BY last_seen DESC`
         );
         const maps = emptyLeadQualityMaps();
+        maps.campaignAliases = buildCampaignAliasLookup(campaignRows);
         maps.hasLeadData = rows.length > 0;
         for (const row of rows) {
             const attribution = row.attribution || {};
-            const campaignId = String(attribution.utm_campaign || '').trim();
+            const campaignId = canonicalCampaignKey(attribution.utm_campaign, maps.campaignAliases);
             const searchTerm = norm(attribution.utm_term);
             bumpLeadBucket(maps.byCampaign, campaignId, row);
-            if (campaignId && searchTerm) bumpLeadBucket(maps.bySearchTerm, `${campaignId}|${searchTerm}`, row);
+            if (campaignId && searchTerm) {
+                bumpLeadBucket(maps.bySearchTerm, `${campaignId}|${searchTerm}`, row);
+                addScopedTerm(maps, campaignId, searchTerm);
+            }
             bumpLeadBucket(maps.bySearchTerm, searchTerm, row);
             for (const root of semanticRootsFromTerm(searchTerm)) {
                 bumpSemanticRoot(maps.bySemanticRoot, root, row, campaignId, searchTerm);
@@ -446,12 +490,17 @@ async function buildLeadQualityMaps(): Promise<LeadQualityMaps> {
         console.warn(`First-party lead quality unavailable for candidate signals: ${err?.message || err}`);
         return emptyLeadQualityMaps();
     } finally {
-        await pool.end().catch(() => undefined);
+        if (!existingPool) await pool.end().catch(() => undefined);
     }
 }
 
 function searchTermLeadQuality(maps: LeadQualityMaps, campaignId: string, term: string): LeadQualityBucket | null {
-    return maps.bySearchTerm.get(`${campaignId}|${norm(term)}`) || maps.bySearchTerm.get(norm(term)) || null;
+    const searchTerm = norm(term);
+    const campaignKey = canonicalCampaignKey(campaignId, maps.campaignAliases);
+    const scoped = campaignKey ? maps.bySearchTerm.get(`${campaignKey}|${searchTerm}`) : null;
+    if (scoped) return scoped;
+    if (campaignKey && (maps.campaignScopedTerms.get(searchTerm)?.size || 0) > 0) return null;
+    return maps.bySearchTerm.get(searchTerm) || null;
 }
 
 function rootMatchesTerm(root: string, term: string): boolean {
@@ -644,6 +693,7 @@ function wastedSpendSignals(keywordRows: any[], campaigns: Record<string, Campai
             entity: {
                 resource: 'keyword',
                 campaign_id: kw.campaignId,
+                campaign_name: kw.campaignName || null,
                 ad_group_id: kw.adGroupId,
                 criterion_id: kw.criterionId,
                 keyword_text: kw.text,
@@ -710,6 +760,7 @@ function querySignals(searchTermRows: any[], campaigns: Record<string, CampaignS
                     entity: {
                         resource: 'search_term',
                         campaign_id: st.campaignId,
+                        campaign_name: camp?.name || null,
                         ad_group_id: st.adGroupId,
                         search_term: st.term,
                         already_negative: true
@@ -746,6 +797,7 @@ function querySignals(searchTermRows: any[], campaigns: Record<string, CampaignS
                 entity: {
                     resource: 'search_term',
                     campaign_id: st.campaignId,
+                    campaign_name: camp?.name || null,
                     ad_group_id: st.adGroupId,
                     search_term: st.term,
                     semantic_root: learnedRoot?.root || root || null,
@@ -799,6 +851,7 @@ function querySignals(searchTermRows: any[], campaigns: Record<string, CampaignS
                 entity: {
                     resource: 'search_term',
                     campaign_id: st.campaignId,
+                    campaign_name: camp?.name || null,
                     ad_group_id: st.adGroupId,
                     search_term: st.term,
                     already_configured: configuredCoverage.isConfiguredKeyword,
@@ -1267,6 +1320,7 @@ function suggestedVerificationSpec(signal: CandidateSignal): Record<string, any>
             observable: true,
             entity: {
                 campaign_id: campaignId,
+                campaign_name: entity.campaign_name || undefined,
                 ad_group_id: adGroupId || undefined,
                 criterion_id: entity.criterion_id || undefined,
                 keyword_text: entity.keyword_text || undefined,
@@ -1282,6 +1336,7 @@ function suggestedVerificationSpec(signal: CandidateSignal): Record<string, any>
             observable: true,
             entity: {
                 campaign_id: campaignId,
+                campaign_name: entity.campaign_name || undefined,
                 ad_group_id: adGroupId || undefined,
                 search_term: entity.search_term
             },
@@ -1296,6 +1351,7 @@ function suggestedVerificationSpec(signal: CandidateSignal): Record<string, any>
                 observable: true,
                 entity: {
                     campaign_id: campaignId,
+                    campaign_name: entity.campaign_name || undefined,
                     ad_group_id: adGroupId || undefined,
                     keyword_text: entity.search_term
                 },
@@ -1307,6 +1363,7 @@ function suggestedVerificationSpec(signal: CandidateSignal): Record<string, any>
             observable: true,
             entity: {
                 campaign_id: campaignId,
+                campaign_name: entity.campaign_name || undefined,
                 ad_group_id: adGroupId || undefined,
                 keyword_text: entity.search_term
             },
@@ -1433,8 +1490,121 @@ function competitorPressureSignals(searchTermRows: any[], keywordRows: any[], au
     return signals;
 }
 
-async function run() {
-    console.log('Running deterministic candidate signal engine...');
+function sourceName(reportName: string): string {
+    return reportName.replace(/_/g, '-');
+}
+
+function rawPayloadRows(rows: any[]): any[] {
+    return rows.map(row => row.raw_payload || row).filter(Boolean);
+}
+
+function resolveDecisionCustomerId(accountRows: any[], filters: DashboardFilters): string | null {
+    const accountRow = accountRows[0] || {};
+    return String(accountRow.customer?.id || accountRow['customer.id'] || filters.customerId || process.env.GOOGLE_ADS_CUSTOMER_ID || '').trim() || null;
+}
+
+function coverageStatus(entry: CoverageEntry | undefined, name: string): DataCoverageSourceStatus {
+    if (!entry) return { name, status: 'missing', rows: 0, ageHours: null, message: null };
+    return {
+        name,
+        status: entry.status === 'covered' ? 'ok' : entry.status === 'partial' ? 'failed' : entry.status,
+        rows: entry.rowCount,
+        ageHours: null,
+        message: entry.error || (entry.status === 'partial' ? `Partial coverage for ${name}.` : null)
+    };
+}
+
+function addRawReport(name: string, rows: any[], coverage?: CoverageEntry): void {
+    rawReportCache.set(name, rows);
+    sourceStatusCache.set(name, coverage ? coverageStatus(coverage, name) : {
+        name,
+        status: rows.length ? 'ok' : 'empty',
+        rows: rows.length,
+        ageHours: null,
+        message: null
+    });
+}
+
+function hydrateReportCaches(bundle: DashboardReportBundle): void {
+    rawReportCache.clear();
+    sourceStatusCache.clear();
+    const coverageByName = new Map(bundle.coverage.map(entry => [sourceName(entry.reportName), entry]));
+    addRawReport('account-summary', rawPayloadRows(bundle.accountDaily), coverageByName.get('account-summary'));
+    addRawReport('campaign-performance', rawPayloadRows(bundle.campaignDaily), coverageByName.get('campaign-performance'));
+    addRawReport('keyword-performance', rawPayloadRows(bundle.keywordDaily), coverageByName.get('keyword-performance'));
+    addRawReport('search-term-performance', rawPayloadRows(bundle.searchTermDaily), coverageByName.get('search-term-performance'));
+    addRawReport('auction-insights-domains', rawPayloadRows(bundle.auctionInsightsRows), coverageByName.get('auction-insights-domains'));
+    addRawReport('landing-page-performance', rawPayloadRows(bundle.landingPageDaily), coverageByName.get('landing-page-performance'));
+    addRawReport('expanded-landing-page-performance', rawPayloadRows(bundle.expandedLandingPageDaily), coverageByName.get('expanded-landing-page-performance'));
+    addRawReport('quality-score', rawPayloadRows(bundle.qualityScores), coverageByName.get('quality-score'));
+    addRawReport('device-performance', rawPayloadRows(bundle.deviceDaily), coverageByName.get('device-performance'));
+    addRawReport('day-of-week-performance', rawPayloadRows(bundle.dayOfWeekDaily), coverageByName.get('day-of-week-performance'));
+    addRawReport('day-and-hour-performance', rawPayloadRows(bundle.dayHourDaily), coverageByName.get('day-and-hour-performance'));
+    addRawReport('conversion-action-performance', rawPayloadRows(bundle.conversionActionDaily), coverageByName.get('conversion-action-performance'));
+    addRawReport('conversion-attribution-by-search-term', rawPayloadRows(bundle.conversionSearchTermDaily), coverageByName.get('conversion-attribution-by-search-term'));
+    addRawReport('configured-keywords', rawPayloadRows(bundle.configuredKeywords));
+    addRawReport('account-negatives', rawPayloadRows(bundle.negatives.accountNegativeLists));
+    addRawReport('campaign-negatives', rawPayloadRows(bundle.negatives.campaignNegatives));
+    addRawReport('ad-group-negatives', rawPayloadRows(bundle.negatives.adGroupNegatives));
+    addRawReport('shared-negative-sets', rawPayloadRows(bundle.negatives.sharedNegativeSets));
+    addRawReport('shared-negative-criteria', rawPayloadRows(bundle.negatives.sharedNegativeCriteria));
+    addRawReport('campaign-shared-sets', rawPayloadRows(bundle.negatives.campaignSharedSets));
+    addRawReport('keyword-planner-ideas', rawPayloadRows(bundle.keywordPlannerIdeas));
+    addRawReport('keyword-planner-historical-metrics', rawPayloadRows(bundle.keywordPlannerHistorical));
+    addRawReport('auction-insights-status', rawPayloadRows(bundle.auctionInsightsStatus));
+}
+
+function signalToWarehouseRow(signal: CandidateSignal, filters: DashboardFilters): CandidateSignalRow {
+    return {
+        signal_id: signal.signal_id,
+        customer_id: filters.customerId,
+        signal_type: signal.type,
+        severity: signal.severity,
+        campaign_id: signal.campaign_id || signal.entity?.campaign_id || null,
+        ad_group_id: signal.entity?.ad_group_id || null,
+        evidence_start_date: signal.evidence_window?.start || filters.startDate,
+        evidence_end_date: signal.evidence_window?.end || filters.endDate,
+        payload: signal
+    };
+}
+
+export interface GenerateCandidateSignalsOptions {
+    filters?: Partial<DashboardFilters>;
+    runId?: string;
+    useExistingRun?: boolean;
+    ensureSchemas?: boolean;
+}
+
+export async function generateCandidateSignals(pool: Pool, options: GenerateCandidateSignalsOptions = {}): Promise<{
+    filters: DashboardFilters;
+    runId: string;
+    signals: CandidateSignal[];
+}> {
+    const signalRunId = options.runId || `signals_${crypto.randomUUID()}`;
+    let filters: DashboardFilters | null = null;
+    let ownRunInserted = false;
+    try {
+        if (options.ensureSchemas !== false) {
+            await ensureDatabaseSchema(pool);
+            await ensureAdsWarehouseSchema(pool);
+        }
+        filters = await resolveDashboardFilters(pool, options.filters || {});
+        const bundle = await getDashboardReportBundle(pool, filters);
+        hydrateReportCaches(bundle);
+        if (!options.useExistingRun) {
+            await startWarehouseRefreshRun(pool, {
+                id: signalRunId,
+                kind: 'repair',
+                customerId: filters.customerId,
+                requestedStartDate: filters.startDate,
+                requestedEndDate: filters.endDate
+            });
+            ownRunInserted = true;
+        }
+    } catch (err) {
+        throw err;
+    }
+    if (!filters) throw new Error('Failed to resolve dashboard filters for candidate signals.');
     const campaignRows = readReport('campaign-performance');
     const accountRows = readReport('account-summary');
     const keywordRows = readReport('keyword-performance');
@@ -1448,7 +1618,7 @@ async function run() {
     const dayHourRows = readReport('day-and-hour-performance');
     const conversionActionRows = readReport('conversion-action-performance');
     const conversionAttributionRows = readReport('conversion-attribution-by-search-term');
-    const customerId = String(accountRows[0]?.customer?.id || process.env.GOOGLE_ADS_CUSTOMER_ID || '').trim() || null;
+    const customerId = resolveDecisionCustomerId(accountRows, filters);
     const configuredKeywordRows = rawJsonReport('configured-keywords');
     const decision: DecisionSources = {
         customerId,
@@ -1480,7 +1650,7 @@ async function run() {
     const acc = calculateAccount(accountRows.length ? accountRows : campaignRows, fallbackCpaBenchmark);
     const campaigns = buildCampaignStats(campaignRows, acc);
     const primaryMaps = buildPrimaryConversionMaps(conversionActionRows, conversionAttributionRows);
-    const leadMaps = await buildLeadQualityMaps();
+    const leadMaps = await buildLeadQualityMaps(pool, campaignRows);
 
     const rawSignals = [
         ...roasDropSignals(campaignRows, campaigns, auctionRows),
@@ -1524,12 +1694,56 @@ async function run() {
         return order[b.severity] - order[a.severity];
     });
 
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(OUT_FILE, JSON.stringify(signals, null, 2) + '\n');
-    console.log(`Saved ${signals.length} candidate signals to ${OUT_FILE}`);
+    try {
+        await replaceCandidateSignals(pool, filters.customerId, filters, signals.map(signal => signalToWarehouseRow(signal, filters)), signalRunId);
+        if (ownRunInserted) {
+            await completeWarehouseRefreshRun(pool, signalRunId, {
+                status: 'succeeded',
+                customerId: filters.customerId,
+                effectiveStartDate: filters.startDate,
+                effectiveEndDate: filters.endDate,
+                sourceSummary: { candidate_signals: { status: 'ok', rows: signals.length } }
+            });
+        }
+        console.log(`Saved ${signals.length} candidate signals to Postgres candidate_signals`);
+        return { filters, runId: signalRunId, signals };
+    } catch (err: any) {
+        if (ownRunInserted) await completeWarehouseRefreshRun(pool, signalRunId, {
+            status: 'failed',
+            customerId: filters.customerId,
+            effectiveStartDate: filters.startDate,
+            effectiveEndDate: filters.endDate,
+            sourceSummary: { candidate_signals: { status: 'failed', rows: 0 } },
+            error: err?.message || String(err)
+        }).catch(() => undefined);
+        throw err;
+    }
 }
 
-run().catch(err => {
-    console.error('Fatal error in candidate signal engine:', err);
-    process.exitCode = 1;
-});
+async function run() {
+    console.log('Running deterministic candidate signal engine...');
+    if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required for DB-backed deterministic candidate signals.');
+    const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    });
+    try {
+        await generateCandidateSignals(pool);
+    } finally {
+        await pool.end();
+    }
+}
+
+if (require.main === module) {
+    run().catch(err => {
+        console.error('Fatal error in candidate signal engine:', err);
+        process.exitCode = 1;
+    });
+}
+
+export const __deterministicRulesTestHooks = {
+    buildCampaignAliasLookup,
+    buildLeadQualityMaps,
+    resolveDecisionCustomerId,
+    searchTermLeadQuality
+};

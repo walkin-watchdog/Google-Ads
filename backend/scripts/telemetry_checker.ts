@@ -1,10 +1,10 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import * as fs from 'fs';
-import * as path from 'path';
 import { Pool } from 'pg';
 import { ensureDatabaseSchema, normalizeVerificationSpec, VerificationSpec } from '../lib/proposals';
+import { resolveDashboardFilters, buildDashboardPayload } from '../lib/dashboardPayload';
+import { ensureAdsWarehouseSchema, getDashboardReportBundle, type DashboardFilters, type DashboardReportBundle } from '../lib/adsWarehouse';
 import {
     configuredKeywordRuleFromReportRow,
     decisionContextForTerm,
@@ -13,9 +13,6 @@ import {
     type ConfiguredKeywordRule,
     type NegativeRule
 } from '../lib/decisionContext';
-
-const ROOT = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(ROOT, 'data', 'latest');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -44,26 +41,33 @@ function normalizeData(flatData: any[]): any[] {
     });
 }
 
+const rawReportCache = new Map<string, any[]>();
+
 function readReport(name: string): any[] {
-    try {
-        const file = path.join(DATA_DIR, `${name}.json`);
-        if (!fs.existsSync(file)) return [];
-        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return normalizeData(Array.isArray(raw) ? raw : []);
-    } catch {
-        return [];
-    }
+    return normalizeData(rawReportCache.get(name) || []);
 }
 
 function readRawReport(name: string): any[] {
-    try {
-        const file = path.join(DATA_DIR, `${name}.json`);
-        if (!fs.existsSync(file)) return [];
-        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return Array.isArray(raw) ? raw : [];
-    } catch {
-        return [];
-    }
+    return rawReportCache.get(name) || [];
+}
+
+function rawPayloadRows(rows: any[]): any[] {
+    return rows.map(row => row.raw_payload || row).filter(Boolean);
+}
+
+function hydrateReportCache(bundle: DashboardReportBundle): void {
+    rawReportCache.clear();
+    rawReportCache.set('campaign-performance', rawPayloadRows(bundle.campaignDaily));
+    rawReportCache.set('campaign-config', rawPayloadRows(bundle.campaignSnapshot));
+    rawReportCache.set('keyword-performance', rawPayloadRows(bundle.keywordDaily));
+    rawReportCache.set('search-term-performance', rawPayloadRows(bundle.searchTermDaily));
+    rawReportCache.set('configured-keywords', rawPayloadRows(bundle.configuredKeywords));
+    rawReportCache.set('account-negatives', rawPayloadRows(bundle.negatives.accountNegativeLists));
+    rawReportCache.set('campaign-negatives', rawPayloadRows(bundle.negatives.campaignNegatives));
+    rawReportCache.set('ad-group-negatives', rawPayloadRows(bundle.negatives.adGroupNegatives));
+    rawReportCache.set('shared-negative-sets', rawPayloadRows(bundle.negatives.sharedNegativeSets));
+    rawReportCache.set('shared-negative-criteria', rawPayloadRows(bundle.negatives.sharedNegativeCriteria));
+    rawReportCache.set('campaign-shared-sets', rawPayloadRows(bundle.negatives.campaignSharedSets));
 }
 
 function moneyMicros(v: any): number {
@@ -189,11 +193,9 @@ function buildCurrentState(keywordData: any[], configuredKeywordData: Configured
     return { campaigns, keywords, searchTerms, negativeRules, configuredKeywords: configuredKeywordData };
 }
 
-async function latestDashboardDecisionSnapshot(): Promise<Record<string, any> | null> {
+async function latestDashboardDecisionSnapshot(filters: DashboardFilters): Promise<Record<string, any> | null> {
     try {
-        const { rows } = await pool.query(`SELECT payload FROM dashboard_payloads WHERE id = 'latest'`);
-        const payload = rows[0]?.payload || null;
-        if (!payload) return null;
+        const payload = await buildDashboardPayload(pool, filters);
         return {
             meta: payload.meta || null,
             decisionContext: payload.decisionContext || null,
@@ -358,14 +360,18 @@ async function run() {
         return;
     }
     await ensureDatabaseSchema(pool);
+    await ensureAdsWarehouseSchema(pool);
+    const filters = await resolveDashboardFilters(pool, {});
+    const bundle = await getDashboardReportBundle(pool, filters);
+    hydrateReportCache(bundle);
 
     const keywordData = readReport('keyword-performance');
     const configuredKeywordData = readRawReport('configured-keywords')
         .map(configuredKeywordRuleFromReportRow)
         .filter((row): row is ConfiguredKeywordRule => Boolean(row));
-    const campaignData = readReport('campaign-performance');
+    const campaignData = [...readReport('campaign-performance'), ...readReport('campaign-config')];
     const searchTermData = readReport('search-term-performance');
-    const customerId = String(campaignData[0]?.customer?.id || process.env.GOOGLE_ADS_CUSTOMER_ID || '').trim() || null;
+    const customerId = filters.customerId;
     const negativeRules = normalizeNegativeRulesFromReports({
         customerId,
         accountNegatives: readRawReport('account-negatives'),
@@ -376,7 +382,7 @@ async function run() {
         campaignSharedSets: readRawReport('campaign-shared-sets')
     });
     const state = buildCurrentState(keywordData, configuredKeywordData, campaignData, searchTermData, negativeRules);
-    const latestDecisionSnapshot = await latestDashboardDecisionSnapshot();
+    const latestDecisionSnapshot = await latestDashboardDecisionSnapshot(filters);
 
     const { rows } = await pool.query(
         `SELECT p.proposal_id, p.payload, p.selected_option_id, po.option_uid, po.option_id, po.strategy_id, po.verification_spec, po.baseline_metrics, po.payload AS option_payload

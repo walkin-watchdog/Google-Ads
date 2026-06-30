@@ -2,12 +2,15 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
     authenticateDashboardAccess,
     clearDashboardMagicTokenCookie,
+    clearDashboardSessionAuthCache,
     isLocalDashboardOrigin,
     readDashboardMagicTokenCookie,
+    revokeDashboardSession,
     setDashboardMagicTokenCookie
 } from '../lib/dashboardAuth.ts';
 
 const ORIGINAL_SECRET = process.env.SECRET_API_KEY;
+const ORIGINAL_SESSION_AUTH_CACHE_SECONDS = process.env.DASHBOARD_SESSION_AUTH_CACHE_SECONDS;
 
 function request({ origin, authorization, cookie } = {}) {
     const headers = {};
@@ -47,10 +50,16 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+    clearDashboardSessionAuthCache();
     if (ORIGINAL_SECRET === undefined) {
         delete process.env.SECRET_API_KEY;
     } else {
         process.env.SECRET_API_KEY = ORIGINAL_SECRET;
+    }
+    if (ORIGINAL_SESSION_AUTH_CACHE_SECONDS === undefined) {
+        delete process.env.DASHBOARD_SESSION_AUTH_CACHE_SECONDS;
+    } else {
+        process.env.DASHBOARD_SESSION_AUTH_CACHE_SECONDS = ORIGINAL_SESSION_AUTH_CACHE_SECONDS;
     }
 });
 
@@ -117,6 +126,50 @@ describe('dashboard access middleware', () => {
 
         expect(result.nextCalled).toBe(true);
         expect(result.res.statusCode).toBeNull();
+    });
+
+    test('caches valid dashboard session checks briefly to avoid repeated DB auth updates', async () => {
+        const queries = [];
+        const cookie = `dashboard_session=${encodeURIComponent('b'.repeat(43))}`;
+        const pool = {
+            async query(sql) {
+                queries.push(String(sql));
+                return { rows: [{ id: 'session-id' }] };
+            }
+        };
+
+        const first = await runDashboardAuth(request({ origin: 'https://dashboard.example', cookie }), pool);
+        const second = await runDashboardAuth(request({ origin: 'https://dashboard.example', cookie }), pool);
+
+        expect(first.nextCalled).toBe(true);
+        expect(second.nextCalled).toBe(true);
+        expect(queries).toHaveLength(1);
+    });
+
+    test('revoke clears a cached dashboard session before the next auth check', async () => {
+        const queries = [];
+        let valid = true;
+        const cookie = `dashboard_session=${encodeURIComponent('c'.repeat(43))}`;
+        const req = request({ origin: 'https://dashboard.example', cookie });
+        const pool = {
+            async query(sql) {
+                queries.push(String(sql));
+                if (String(sql).includes('RETURNING id')) {
+                    return { rows: valid ? [{ id: 'session-id' }] : [] };
+                }
+                return { rows: [], rowCount: 1 };
+            }
+        };
+
+        const first = await runDashboardAuth(req, pool);
+        valid = false;
+        await revokeDashboardSession(pool, req);
+        const second = await runDashboardAuth(req, pool);
+
+        expect(first.nextCalled).toBe(true);
+        expect(second.nextCalled).toBe(false);
+        expect(second.res.statusCode).toBe(401);
+        expect(queries.filter(sql => sql.includes('RETURNING id'))).toHaveLength(2);
     });
 });
 

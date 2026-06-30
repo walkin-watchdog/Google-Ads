@@ -29,6 +29,14 @@
     },
     "campaign_id": { "type": ["string", "null"] },
     "campaignId": { "type": ["string", "null"] },
+    "campaign_name": {
+      "type": ["string", "null"],
+      "description": "Optional human campaign name used only as an identity alias/display helper. Do not use it instead of campaign_id when an ID is known."
+    },
+    "campaignName": {
+      "type": ["string", "null"],
+      "description": "Optional camel-case campaign-name alias; campaign_id remains the canonical telemetry key."
+    },
     "selected_option_id": { "type": ["string", "null"] },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
     "created_by": { "type": "string", "enum": ["agent", "deterministic_signal"], "default": "agent" },
@@ -132,7 +140,7 @@
               "observable": { "type": "boolean" },
               "entity": {
                 "type": "object",
-                "description": "Use campaign_id for campaign-level checks. Add ad_group_id plus criterion_id or keyword_text/match_type for keyword checks. Use search_term for search-term checks."
+                "description": "Use campaign_id for campaign-level checks. Optional campaign_name is only a display/lead-attribution alias and must not replace campaign_id when an ID is known. Add ad_group_id plus criterion_id or keyword_text/match_type for keyword checks. Use search_term for search-term checks."
               },
               "expected": {
                 "type": "object",

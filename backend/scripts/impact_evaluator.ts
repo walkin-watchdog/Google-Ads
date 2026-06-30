@@ -1,15 +1,12 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import * as fs from 'fs';
-import * as path from 'path';
 import { Pool } from 'pg';
 import { ensureDatabaseSchema } from '../lib/proposals';
 import { ensureLeadSchema, getLeadQualityMetricsForWindow, LeadQualityMetrics } from '../lib/leads';
 import { ChangeHistoryEvent, getChangeHistoryEvents } from '../lib/changeHistory';
-
-const ROOT = path.resolve(__dirname, '..');
-const DATA_DIR = path.join(ROOT, 'data', 'latest');
+import { ensureAdsWarehouseSchema, getImpactMetricWindow, type DashboardFilters } from '../lib/adsWarehouse';
+import { buildDashboardPayload, resolveDashboardFilters } from '../lib/dashboardPayload';
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -86,39 +83,6 @@ interface ImpactEvaluation {
     };
 }
 
-function normalizeData(flatData: any[]): any[] {
-    return flatData.map(row => {
-        const obj: any = {};
-        for (const [key, value] of Object.entries(row)) {
-            const parts = key.split('.');
-            let current = obj;
-            for (let i = 0; i < parts.length - 1; i++) {
-                const camelPart = parts[i].replace(/_([a-z])/g, (_g, c) => c.toUpperCase());
-                current[camelPart] = current[camelPart] || {};
-                current = current[camelPart];
-            }
-            const finalKey = parts[parts.length - 1].replace(/_([a-z])/g, (_g, c) => c.toUpperCase());
-            current[finalKey] = value;
-        }
-        return obj;
-    });
-}
-
-function readReport(name: string): any[] {
-    try {
-        const file = path.join(DATA_DIR, `${name}.json`);
-        if (!fs.existsSync(file)) return [];
-        const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-        return normalizeData(Array.isArray(raw) ? raw : []);
-    } catch {
-        return [];
-    }
-}
-
-function moneyMicros(v: any): number {
-    return Number(v || 0) / 1_000_000;
-}
-
 function norm(value: any): string {
     return String(value || '').trim().toLowerCase();
 }
@@ -135,36 +99,14 @@ function finalizeMetrics(metrics: Metrics): Metrics {
     };
 }
 
-function aggregateRowsBetween(rows: any[], startDate: Date, endDate: Date, matches: (row: any) => boolean): Metrics {
-    const metrics = emptyMetrics();
-    for (const row of rows) {
-        if (!matches(row)) continue;
-        if (!row.segments?.date) continue;
-        const d = new Date(row.segments.date);
-        if (d >= startDate && d < endDate) {
-            metrics.spend += moneyMicros(row.metrics?.costMicros);
-            metrics.clicks += Number(row.metrics?.clicks || 0);
-            metrics.impressions += Number(row.metrics?.impressions || 0);
-            metrics.conversions += Number(row.metrics?.conversions || 0);
-            metrics.conversionValue += Number(row.metrics?.conversionsValue || 0);
-        }
-    }
-    return finalizeMetrics(metrics);
-}
-
-function aggregatePostRows(rows: any[], startDate: Date, days: number, matches: (row: any) => boolean): Metrics {
-    const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + days);
-    return aggregateRowsBetween(rows, startDate, endDate, matches);
-}
-
-function recordScope(rec: any): { campaignId: string; adGroupId: string; searchTerm: string; keywordText: string; criterionId: string; matchType: string; scope: string } {
+function recordScope(rec: any): { campaignId: string; campaignName: string; adGroupId: string; searchTerm: string; keywordText: string; criterionId: string; matchType: string; scope: string } {
     const baseline = rec.baseline_metrics || {};
     const entity = baseline.entity || {};
     const spec = rec.verification_spec || {};
     const specEntity = spec.entity || {};
     return {
         campaignId: String(entity.campaign_id || specEntity.campaign_id || rec.campaign_id || ''),
+        campaignName: String(entity.campaign_name || entity.campaignName || specEntity.campaign_name || specEntity.campaignName || baseline.campaign_name || rec.campaign_name || ''),
         adGroupId: String(entity.ad_group_id || specEntity.ad_group_id || ''),
         searchTerm: String(entity.search_term || specEntity.search_term || ''),
         keywordText: String(specEntity.keyword_text || entity.keyword_text || entity.search_term || specEntity.search_term || ''),
@@ -174,79 +116,78 @@ function recordScope(rec: any): { campaignId: string; adGroupId: string; searchT
     };
 }
 
-function postMetricsForRecord(rec: any, reports: { campaigns: any[]; keywords: any[]; searchTerms: any[] }, days: number): Metrics {
+interface ImpactReportContext {
+    customerId: string;
+}
+
+function dateOnly(date: Date): string {
+    return date.toISOString().slice(0, 10);
+}
+
+function impactMetricScope(rec: any): 'campaign' | 'keyword' | 'search_term' {
+    const spec = rec.verification_spec || {};
+    const scope = recordScope(rec);
+    if (scope.scope === 'search_term' || spec.kind === 'negative_search_term_added') return 'search_term';
+    if (
+        scope.scope === 'keyword' ||
+        spec.kind === 'keyword_added_exact' ||
+        spec.kind === 'keyword_status' ||
+        spec.kind === 'manual_bid_changed'
+    ) {
+        return 'keyword';
+    }
+    return 'campaign';
+}
+
+async function postMetricsForRecord(rec: any, reports: ImpactReportContext, days: number): Promise<Metrics> {
     const detectedAt = new Date(rec.detected_at);
     return windowMetricsForRecord(rec, reports, detectedAt, addDays(detectedAt, days), 'target');
 }
 
-function preMetricsForRecord(rec: any, reports: { campaigns: any[]; keywords: any[]; searchTerms: any[] }, days: number): Metrics {
+async function preMetricsForRecord(rec: any, reports: ImpactReportContext, days: number): Promise<Metrics> {
     const detectedAt = new Date(rec.detected_at);
     return windowMetricsForRecord(rec, reports, addDays(detectedAt, -days), detectedAt, 'target');
 }
 
-function controlPreMetricsForRecord(rec: any, reports: { campaigns: any[]; keywords: any[]; searchTerms: any[] }, days: number): Metrics {
+async function controlPreMetricsForRecord(rec: any, reports: ImpactReportContext, days: number): Promise<Metrics> {
     const detectedAt = new Date(rec.detected_at);
     return windowMetricsForRecord(rec, reports, addDays(detectedAt, -days), detectedAt, 'control');
 }
 
-function controlPostMetricsForRecord(rec: any, reports: { campaigns: any[]; keywords: any[]; searchTerms: any[] }, days: number): Metrics {
+async function controlPostMetricsForRecord(rec: any, reports: ImpactReportContext, days: number): Promise<Metrics> {
     const detectedAt = new Date(rec.detected_at);
     return windowMetricsForRecord(rec, reports, detectedAt, addDays(detectedAt, days), 'control');
 }
 
-function windowMetricsForRecord(
+async function windowMetricsForRecord(
     rec: any,
-    reports: { campaigns: any[]; keywords: any[]; searchTerms: any[] },
+    reports: ImpactReportContext,
     startDate: Date,
     endDate: Date,
     mode: 'target' | 'control'
-): Metrics {
-    const spec = rec.verification_spec || {};
+): Promise<Metrics> {
     const scope = recordScope(rec);
-    const campaignId = scope.campaignId;
-
-    if (spec.kind === 'keyword_added_exact') {
-        const text = scope.keywordText;
-        return aggregateRowsBetween(reports.keywords, startDate, endDate, row => {
-            if (String(row.campaign?.id || '') !== campaignId) return false;
-            const sameKeyword = norm(row.adGroupCriterion?.keyword?.text) === norm(text)
-                && String(row.adGroupCriterion?.keyword?.matchType || '') === 'EXACT';
-            if (mode === 'target') return sameKeyword;
-            if (scope.adGroupId && String(row.adGroup?.id || '') !== scope.adGroupId) return false;
-            return !sameKeyword;
-        });
-    }
-
-    if (scope.scope === 'keyword' || spec.kind === 'keyword_status' || spec.kind === 'manual_bid_changed') {
-        return aggregateRowsBetween(reports.keywords, startDate, endDate, row => {
-            if (String(row.campaign?.id || '') !== campaignId) return false;
-            if (scope.adGroupId && String(row.adGroup?.id || '') !== scope.adGroupId) return false;
-            const sameCriterion = scope.criterionId && String(row.adGroupCriterion?.criterionId || '') === scope.criterionId;
-            const sameKeyword = scope.keywordText && norm(row.adGroupCriterion?.keyword?.text) === norm(scope.keywordText);
-            const isTarget = Boolean(sameCriterion || sameKeyword);
-            return mode === 'target' ? isTarget : !isTarget;
-        });
-    }
-
-    if (scope.scope === 'search_term' || spec.kind === 'negative_search_term_added') {
-        return aggregateRowsBetween(reports.searchTerms, startDate, endDate, row => {
-            if (String(row.campaign?.id || '') !== campaignId) return false;
-            if (scope.adGroupId && String(row.adGroup?.id || '') !== scope.adGroupId) return false;
-            const isTarget = norm(row.searchTermView?.searchTerm) === norm(scope.searchTerm || scope.keywordText);
-            return mode === 'target' ? isTarget : !isTarget;
-        });
-    }
-
-    return aggregateRowsBetween(reports.campaigns, startDate, endDate, row => {
-        const isTarget = String(row.campaign?.id || '') === campaignId;
-        return mode === 'target' ? isTarget : !isTarget;
+    const metrics = await getImpactMetricWindow(pool, {
+        customerId: reports.customerId,
+        startDate: dateOnly(startDate),
+        endDate: dateOnly(endDate),
+        scope: impactMetricScope(rec),
+        campaignId: scope.campaignId || null,
+        adGroupId: scope.adGroupId || null,
+        criterionId: scope.criterionId || null,
+        keywordText: scope.keywordText || null,
+        matchType: scope.matchType || null,
+        searchTerm: scope.searchTerm || scope.keywordText || null,
+        mode
     });
+    return finalizeMetrics(metrics);
 }
 
-function leadScopeForRecord(rec: any): { campaignId: string | null; searchTerm: string | null } {
+function leadScopeForRecord(rec: any): { campaignId: string | null; campaignName: string | null; searchTerm: string | null } {
     const scope = recordScope(rec);
     return {
         campaignId: scope.campaignId || null,
+        campaignName: scope.campaignName || null,
         searchTerm: scope.searchTerm || scope.keywordText || null
     };
 }
@@ -256,8 +197,8 @@ async function leadMetricsForRecord(rec: any, days: number): Promise<{ baseline:
     const baselineStart = addDays(detectedAt, -days);
     const postEnd = addDays(detectedAt, days);
     const scope = leadScopeForRecord(rec);
-    const baseInput = { start: baselineStart, end: detectedAt, campaignId: scope.campaignId, searchTerm: scope.searchTerm };
-    const postInput = { start: detectedAt, end: postEnd, campaignId: scope.campaignId, searchTerm: scope.searchTerm };
+    const baseInput = { start: baselineStart, end: detectedAt, campaignId: scope.campaignId, campaignName: scope.campaignName, searchTerm: scope.searchTerm };
+    const postInput = { start: detectedAt, end: postEnd, campaignId: scope.campaignId, campaignName: scope.campaignName, searchTerm: scope.searchTerm };
     const [baseline, post] = await Promise.all([
         getLeadQualityMetricsForWindow(pool, baseInput),
         getLeadQualityMetricsForWindow(pool, postInput)
@@ -771,10 +712,9 @@ async function applyVote(strategyId: string, evaluation: ImpactEvaluation, rever
     return `${evaluation.vote_column}:${evaluation.vote_weight}`;
 }
 
-async function latestDecisionSourceIssues(): Promise<string[]> {
+async function latestDecisionSourceIssues(filters: DashboardFilters): Promise<string[]> {
     try {
-        const { rows } = await pool.query(`SELECT payload FROM dashboard_payloads WHERE id = 'latest'`);
-        const payload = rows[0]?.payload || {};
+        const payload = await buildDashboardPayload(pool, filters);
         const sourceCoverage = payload.sourceCoverage || {};
         const direct = [
             ...(Array.isArray(sourceCoverage.missingSources) ? sourceCoverage.missingSources : []),
@@ -799,11 +739,13 @@ function requiredSourceIssuesForRecord(rec: any, allIssues: string[]): string[] 
     return required.filter(source => issueSet.has(source));
 }
 
-async function evaluateRecord(rec: any, reports: { campaigns: any[]; keywords: any[]; searchTerms: any[] }, days: number, allImpactRows: any[], sourceIssues: string[]): Promise<ImpactEvaluation> {
-    const targetPre = preMetricsForRecord(rec, reports, days);
-    const targetPost = postMetricsForRecord(rec, reports, days);
-    const controlPre = controlPreMetricsForRecord(rec, reports, days);
-    const controlPost = controlPostMetricsForRecord(rec, reports, days);
+async function evaluateRecord(rec: any, reports: ImpactReportContext, days: number, allImpactRows: any[], sourceIssues: string[]): Promise<ImpactEvaluation> {
+    const [targetPre, targetPost, controlPre, controlPost] = await Promise.all([
+        preMetricsForRecord(rec, reports, days),
+        postMetricsForRecord(rec, reports, days),
+        controlPreMetricsForRecord(rec, reports, days),
+        controlPostMetricsForRecord(rec, reports, days)
+    ]);
     const baseline = baselineForAdsEvaluation(rec, targetPre, days);
     const adsOutcome = evaluateAdsComponent(rec.strategy_id, baseline, targetPost, days, rec.verification_spec);
     const leadMetrics = await leadMetricsForRecord(rec, days);
@@ -833,6 +775,7 @@ async function run() {
     }
     await ensureDatabaseSchema(pool);
     await ensureLeadSchema(pool);
+    await ensureAdsWarehouseSchema(pool);
 
     const { rows: records } = await pool.query(
         `SELECT option_uid, option_id, proposal_id, detected_at, campaign_id, strategy_id, verification_spec, baseline_metrics, tracking_status, interim_vote_14
@@ -850,12 +793,9 @@ async function run() {
          WHERE campaign_id IS NOT NULL`
     );
 
-    const reports = {
-        campaigns: readReport('campaign-performance'),
-        keywords: readReport('keyword-performance'),
-        searchTerms: readReport('search-term-performance')
-    };
-    const sourceIssues = await latestDecisionSourceIssues();
+    const filters = await resolveDashboardFilters(pool, {});
+    const reports = { customerId: filters.customerId };
+    const sourceIssues = await latestDecisionSourceIssues(filters);
 
     const now = new Date();
     for (const rec of records) {

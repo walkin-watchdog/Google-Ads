@@ -25,6 +25,13 @@ function cleanId(value: any): string | null {
     return text;
 }
 
+function resourceId(value: any): string | null {
+    const text = clean(value);
+    if (!text) return null;
+    const last = text.split('/').filter(Boolean).pop();
+    return cleanId(last);
+}
+
 function parseChangedFields(value: any): string[] {
     if (Array.isArray(value)) return value.map(item => String(item || '').trim()).filter(Boolean);
     return String(value || '')
@@ -56,8 +63,8 @@ export function normalizeChangeHistoryRows(rows: any[]): ChangeHistoryEvent[] {
         .map(row => ({
             event_uid: eventUid(row),
             change_date_time: String(row['change_event.change_date_time'] || ''),
-            campaign_id: cleanId(row['campaign.id']),
-            ad_group_id: cleanId(row['ad_group.id']),
+            campaign_id: resourceId(row['change_event.campaign']) || cleanId(row['campaign.id']),
+            ad_group_id: resourceId(row['change_event.ad_group']) || cleanId(row['ad_group.id']),
             resource_type: String(row['change_event.change_resource_type'] || 'UNKNOWN'),
             operation: String(row['change_event.resource_change_operation'] || 'UNKNOWN'),
             changed_fields: parseChangedFields(row['change_event.changed_fields']),

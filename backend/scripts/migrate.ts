@@ -6,6 +6,7 @@ import { ensureDatabaseSchema } from '../lib/proposals';
 import { ensureLeadSchema } from '../lib/leads';
 import { ensureSemanticMemorySchema } from '../lib/semanticMemory';
 import { ensureDashboardAuthSchema } from '../lib/dashboardAuth';
+import { ensureAdsWarehouseSchema } from '../lib/adsWarehouse';
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -18,6 +19,7 @@ async function run() {
         return;
     }
     await ensureDatabaseSchema(pool);
+    await ensureAdsWarehouseSchema(pool);
     await ensureLeadSchema(pool);
     await ensureDashboardAuthSchema(pool);
     await ensureSemanticMemorySchema(pool);

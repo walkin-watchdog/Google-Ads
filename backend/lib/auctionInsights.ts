@@ -320,15 +320,15 @@ function statusFor(entity: AuctionInsightsEntity, status: AuctionInsightsEntityS
     };
 }
 
-export async function fetchAuctionInsightsFeed(outputPath: string, options: {
+export async function fetchAuctionInsightsFeed(outputPath: string | null, options: {
     pool?: Pool | null;
     entities: AuctionInsightsEntity[];
-    statusOutputPath?: string;
+    statusOutputPath?: string | null;
 }): Promise<AuctionInsightsFetchResult> {
     const refreshToken = process.env.GOOGLE_SHEETS_REFRESH_TOKEN || '';
     const range = normalizeSheetValuesRange(process.env.GOOGLE_SHEETS_RANGE);
     const entities = options.entities.filter(entity => entity.enabled !== false);
-    const statusOutputPath = options.statusOutputPath || outputPath.replace(/\.json$/, '-status.json');
+    const statusOutputPath = options.statusOutputPath || (outputPath ? outputPath.replace(/\.json$/, '-status.json') : null);
 
     if (!refreshToken.trim()) {
         const statuses = entities.map(entity => statusFor(
@@ -337,8 +337,8 @@ export async function fetchAuctionInsightsFeed(outputPath: string, options: {
             null,
             'GOOGLE_SHEETS_REFRESH_TOKEN is missing. Add it to .env / Render environment variables.'
         ));
-        writeJsonAtomic(outputPath, []);
-        writeJsonAtomic(statusOutputPath, statuses);
+        if (outputPath) writeJsonAtomic(outputPath, []);
+        if (statusOutputPath) writeJsonAtomic(statusOutputPath, statuses);
         return { rows: [], statuses, source: 'none', message: 'GOOGLE_SHEETS_REFRESH_TOKEN is missing; Auction Insights rows were cleared.' };
     }
 
@@ -391,8 +391,8 @@ export async function fetchAuctionInsightsFeed(outputPath: string, options: {
         }
     }
 
-    writeJsonAtomic(outputPath, allRows);
-    writeJsonAtomic(statusOutputPath, statuses);
+    if (outputPath) writeJsonAtomic(outputPath, allRows);
+    if (statusOutputPath) writeJsonAtomic(statusOutputPath, statuses);
     const okCount = statuses.filter(status => status.status === 'ok').length;
     return {
         rows: allRows,
