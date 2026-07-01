@@ -1296,6 +1296,22 @@ CREATE TABLE IF NOT EXISTS candidate_signals (
   generated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS candidate_signals_scope_idx ON candidate_signals(customer_id, evidence_start_date, evidence_end_date, campaign_id, ad_group_id, signal_type);
+
+CREATE TABLE IF NOT EXISTS google_ads_warehouse_slice_fingerprints (
+  customer_id TEXT NOT NULL,
+  source_table TEXT NOT NULL,
+  scope_level TEXT NOT NULL CHECK (scope_level IN ('account', 'campaign', 'ad_group', 'account_parent', 'campaign_parent')),
+  slice_date TEXT NOT NULL,
+  campaign_id TEXT NOT NULL DEFAULT '*',
+  ad_group_id TEXT NOT NULL DEFAULT '*',
+  row_count INTEGER NOT NULL DEFAULT 0,
+  fingerprint TEXT NOT NULL,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (customer_id, source_table, scope_level, slice_date, campaign_id, ad_group_id)
+);
+CREATE INDEX IF NOT EXISTS google_ads_warehouse_slice_fingerprints_lookup_idx
+  ON google_ads_warehouse_slice_fingerprints(customer_id, slice_date, source_table, scope_level, campaign_id, ad_group_id);
+
 CREATE INDEX IF NOT EXISTS google_ads_account_daily_watermark_idx ON google_ads_account_daily(customer_id, date, fetched_at DESC);
 CREATE INDEX IF NOT EXISTS google_ads_campaign_daily_watermark_idx ON google_ads_campaign_daily(customer_id, date, fetched_at DESC);
 CREATE INDEX IF NOT EXISTS google_ads_campaign_daily_scoped_watermark_idx ON google_ads_campaign_daily(customer_id, campaign_id, date, fetched_at DESC);
@@ -1388,6 +1404,57 @@ const WATERMARK_FACT_TABLES = [
     'google_ads_conversion_search_term_daily',
     'google_ads_click_evidence_daily'
 ];
+
+type WarehouseFingerprintScopeLevel = 'account' | 'campaign' | 'ad_group' | 'account_parent' | 'campaign_parent';
+type WarehouseFingerprintDateMode = 'dated' | 'global' | 'candidate';
+
+type WarehouseFingerprintSource = {
+    table: string;
+    dateMode: WarehouseFingerprintDateMode;
+    parentAware?: boolean;
+};
+
+type WarehouseFingerprintRow = {
+    customer_id: string;
+    source_table: string;
+    scope_level: WarehouseFingerprintScopeLevel;
+    slice_date: string;
+    campaign_id: string;
+    ad_group_id: string;
+    row_count: number;
+    fingerprint: string;
+};
+
+const FINGERPRINT_GLOBAL_SLICE = '*';
+const FINGERPRINT_ANY_ID = '*';
+
+const SNAPSHOT_FINGERPRINT_TABLES = [
+    'google_ads_campaign_snapshot',
+    'google_ads_ad_group_snapshot',
+    'google_ads_configured_keywords',
+    'google_ads_quality_score_snapshot',
+    'google_ads_campaign_negatives',
+    'google_ads_ad_group_negatives',
+    'google_ads_account_negative_lists',
+    'google_ads_shared_negative_sets',
+    'google_ads_shared_negative_criteria',
+    'google_ads_campaign_shared_sets'
+];
+
+const WAREHOUSE_FINGERPRINT_SOURCES: WarehouseFingerprintSource[] = [
+    ...WATERMARK_FACT_TABLES.map(table => ({ table, dateMode: 'dated' as const })),
+    ...SNAPSHOT_FINGERPRINT_TABLES.map(table => ({ table, dateMode: 'global' as const, parentAware: true })),
+    { table: 'candidate_signals', dateMode: 'candidate', parentAware: true },
+    { table: 'google_ads_keyword_planner_ideas', dateMode: 'global' },
+    { table: 'google_ads_keyword_planner_historical', dateMode: 'global' },
+    { table: 'google_ads_auction_insights_rows', dateMode: 'global', parentAware: true },
+    { table: 'google_ads_auction_insights_status', dateMode: 'global' },
+    { table: 'google_ads_report_coverage', dateMode: 'dated' }
+];
+
+const WAREHOUSE_FINGERPRINT_SOURCE_BY_TABLE = new Map(
+    WAREHOUSE_FINGERPRINT_SOURCES.map(source => [source.table, source])
+);
 
 const CAMPAIGN_SCOPED_TABLES = new Set([
     'google_ads_campaign_daily',
@@ -1606,8 +1673,11 @@ async function replaceDateWindow(
     assertDate(endDate, 'endDate');
     if (startDate > endDate) throw new Error('startDate must be before or equal to endDate.');
     const replaced = await withTransaction(db, async client => {
+        const previousRows = await selectFingerprintDateRows(client, table, customerId, startDate, endDate);
         await client.query(`DELETE FROM ${table} WHERE customer_id = $1 AND date BETWEEN $2::date AND $3::date`, [customerId, startDate, endDate]);
-        return insertRows(client, table, columns, rows, runId);
+        const inserted = await insertRows(client, table, columns, rows, runId);
+        await refreshDateWindowFingerprints(client, table, customerId, startDate, endDate, previousRows);
+        return inserted;
     });
     invalidateAdsWarehouseRuntimeCaches();
     return replaced;
@@ -1623,6 +1693,7 @@ async function replaceSnapshot(
     runId: string
 ): Promise<number> {
     const replaced = await withTransaction(db, async client => {
+        const previousRows = await selectFingerprintCustomerRows(client, table, customerId, true);
         await client.query(`UPDATE ${table} SET present_in_latest_snapshot = false WHERE customer_id = $1`, [customerId]);
         const now = new Date();
         const enriched = rows.map(row => ({
@@ -1633,9 +1704,11 @@ async function replaceSnapshot(
             last_seen_at: now,
             snapshot_run_id: runId
         }));
-        return upsertRows(client, table, columns, conflictColumns, enriched, runId, [
+        const upserted = await upsertRows(client, table, columns, conflictColumns, enriched, runId, [
             'first_seen_at'
         ]);
+        await refreshCustomerFingerprints(client, table, customerId, previousRows, true);
+        return upserted;
     });
     invalidateAdsWarehouseRuntimeCaches();
     return replaced;
@@ -1649,8 +1722,11 @@ async function replaceCustomerRows(
     rows: Record<string, any>[]
 ): Promise<number> {
     const replaced = await withTransaction(db, async client => {
+        const previousRows = await selectFingerprintCustomerRows(client, table, customerId);
         await client.query(`DELETE FROM ${table} WHERE customer_id = $1`, [customerId]);
-        return insertRows(client, table, columns, rows);
+        const inserted = await insertRows(client, table, columns, rows);
+        await refreshCustomerFingerprints(client, table, customerId, previousRows);
+        return inserted;
     });
     invalidateAdsWarehouseRuntimeCaches();
     return replaced;
@@ -1805,9 +1881,420 @@ const candidateSignalColumns = [
     'evidence_start_date', 'evidence_end_date', 'payload', 'run_id', 'generated_at'
 ];
 
+const WAREHOUSE_FINGERPRINT_COLUMNS_BY_TABLE = new Map<string, string[]>([
+    ['google_ads_account_daily', accountDailyColumns],
+    ['google_ads_campaign_daily', campaignDailyColumns],
+    ['google_ads_ad_group_daily', adGroupDailyColumns],
+    ['google_ads_keyword_daily', keywordDailyColumns],
+    ['google_ads_search_term_daily', searchTermDailyColumns],
+    ['google_ads_device_daily', deviceDailyColumns],
+    ['google_ads_day_of_week_daily', dayOfWeekDailyColumns],
+    ['google_ads_day_hour_daily', dayHourDailyColumns],
+    ['google_ads_landing_page_daily', landingPageDailyColumns],
+    ['google_ads_expanded_landing_page_daily', expandedLandingPageDailyColumns],
+    ['google_ads_conversion_action_daily', conversionActionDailyColumns],
+    ['google_ads_conversion_ad_group_daily', conversionScopedDailyColumns],
+    ['google_ads_conversion_search_term_daily', conversionSearchTermDailyColumns],
+    ['google_ads_click_evidence_daily', clickEvidenceDailyColumns],
+    ['google_ads_campaign_snapshot', campaignSnapshotColumns],
+    ['google_ads_ad_group_snapshot', adGroupSnapshotColumns],
+    ['google_ads_configured_keywords', configuredKeywordColumns],
+    ['google_ads_quality_score_snapshot', qualityScoreColumns],
+    ['google_ads_campaign_negatives', campaignNegativeColumns],
+    ['google_ads_ad_group_negatives', adGroupNegativeColumns],
+    ['google_ads_account_negative_lists', accountNegativeListColumns],
+    ['google_ads_shared_negative_sets', sharedNegativeSetColumns],
+    ['google_ads_shared_negative_criteria', sharedNegativeCriterionColumns],
+    ['google_ads_campaign_shared_sets', campaignSharedSetColumns],
+    ['google_ads_keyword_planner_ideas', plannerIdeaColumns],
+    ['google_ads_keyword_planner_historical', plannerHistoricalColumns],
+    ['google_ads_auction_insights_rows', auctionInsightColumns],
+    ['google_ads_auction_insights_status', auctionInsightStatusColumns],
+    ['candidate_signals', candidateSignalColumns],
+    ['google_ads_report_coverage', ['customer_id', 'report_name', 'coverage_date', 'status', 'row_count', 'run_id', 'fetched_at', 'error']]
+]);
+
+const DEFAULT_FINGERPRINT_IGNORED_COLUMNS = new Set([
+    'run_id',
+    'snapshot_run_id',
+    'fetched_at',
+    'first_seen_at',
+    'last_seen_at',
+    'generated_at'
+]);
+
+const FINGERPRINT_INCLUDED_VOLATILE_COLUMNS_BY_TABLE = new Map<string, Set<string>>([
+    ['google_ads_report_coverage', new Set(['fetched_at'])]
+]);
+
+function stableJson(value: any): string {
+    if (value === undefined) return 'null';
+    if (value === null) return 'null';
+    if (value instanceof Date) return JSON.stringify(value.toISOString());
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+    if (typeof value === 'object') {
+        const entries = Object.entries(value)
+            .filter(([, entryValue]) => entryValue !== undefined)
+            .sort(([left], [right]) => left.localeCompare(right));
+        return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableJson(entryValue)}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+}
+
+function warehouseFingerprintColumns(table: string): string[] {
+    const columns = WAREHOUSE_FINGERPRINT_COLUMNS_BY_TABLE.get(table) || [];
+    const includedVolatile = FINGERPRINT_INCLUDED_VOLATILE_COLUMNS_BY_TABLE.get(table) || new Set<string>();
+    return columns.filter(column => !DEFAULT_FINGERPRINT_IGNORED_COLUMNS.has(column) || includedVolatile.has(column));
+}
+
+function fingerprintId(value: any): string {
+    return cleanText(value) || FINGERPRINT_ANY_ID;
+}
+
+function fingerprintSliceDate(value: any): string {
+    return isoDate(value) || FINGERPRINT_GLOBAL_SLICE;
+}
+
+function fingerprintGroupKey(row: WarehouseFingerprintRow): string {
+    return [
+        row.customer_id,
+        row.source_table,
+        row.scope_level,
+        row.slice_date,
+        row.campaign_id,
+        row.ad_group_id
+    ].join('\u001f');
+}
+
+function emptyFingerprintRow(
+    customerId: string,
+    table: string,
+    scopeLevel: WarehouseFingerprintScopeLevel,
+    sliceDate: string,
+    campaignId = FINGERPRINT_ANY_ID,
+    adGroupId = FINGERPRINT_ANY_ID
+): WarehouseFingerprintRow {
+    return {
+        customer_id: customerId,
+        source_table: table,
+        scope_level: scopeLevel,
+        slice_date: sliceDate,
+        campaign_id: campaignId,
+        ad_group_id: adGroupId,
+        row_count: 0,
+        fingerprint: ''
+    };
+}
+
+function rowContentFingerprint(table: string, row: Record<string, any>): string {
+    const columns = warehouseFingerprintColumns(table);
+    const payload = columns.map(column => [column, row[column] ?? null]);
+    return crypto.createHash('sha256').update(stableJson(payload)).digest('hex');
+}
+
+function sliceContentFingerprint(group: WarehouseFingerprintRow, rows: Record<string, any>[]): string {
+    const rowHashes = rows.map(row => rowContentFingerprint(group.source_table, row)).sort();
+    return crypto.createHash('sha256')
+        .update(stableJson([
+            group.source_table,
+            group.scope_level,
+            group.slice_date,
+            group.campaign_id,
+            group.ad_group_id,
+            rowHashes
+        ]))
+        .digest('hex');
+}
+
+function candidateFingerprintDates(row: Record<string, any>): string[] {
+    const start = isoDate(row.evidence_start_date);
+    const end = isoDate(row.evidence_end_date);
+    if (!start || !end || start > end) return [];
+    const windowStart = isoDate(row.__fingerprint_slice_start_date) || start;
+    const windowEnd = isoDate(row.__fingerprint_slice_end_date) || end;
+    const sliceStart = start > windowStart ? start : windowStart;
+    const sliceEnd = end < windowEnd ? end : windowEnd;
+    if (sliceStart > sliceEnd) return [];
+    return dateRange(sliceStart, sliceEnd);
+}
+
+function rowFingerprintSliceDates(source: WarehouseFingerprintSource, row: Record<string, any>): string[] {
+    if (source.dateMode === 'global') return [FINGERPRINT_GLOBAL_SLICE];
+    if (source.dateMode === 'candidate') return candidateFingerprintDates(row);
+    return [fingerprintSliceDate(row.coverage_date || row.date)];
+}
+
+function addFingerprintGroup(
+    groups: Map<string, { row: WarehouseFingerprintRow; rows: Record<string, any>[] }>,
+    customerId: string,
+    source: WarehouseFingerprintSource,
+    scopeLevel: WarehouseFingerprintScopeLevel,
+    sliceDate: string,
+    row: Record<string, any>,
+    campaignId = FINGERPRINT_ANY_ID,
+    adGroupId = FINGERPRINT_ANY_ID
+): void {
+    const group = emptyFingerprintRow(customerId, source.table, scopeLevel, sliceDate, campaignId, adGroupId);
+    const key = fingerprintGroupKey(group);
+    const existing = groups.get(key);
+    if (existing) existing.rows.push(row);
+    else groups.set(key, { row: group, rows: [row] });
+}
+
+function groupRowsForFingerprints(
+    source: WarehouseFingerprintSource,
+    rows: Record<string, any>[],
+    customerIdFallback?: string
+): Map<string, { row: WarehouseFingerprintRow; rows: Record<string, any>[] }> {
+    const groups = new Map<string, { row: WarehouseFingerprintRow; rows: Record<string, any>[] }>();
+    for (const row of rows) {
+        const customerId = cleanText(row.customer_id) || customerIdFallback;
+        if (!customerId) continue;
+        const campaignId = fingerprintId(row.campaign_id);
+        const adGroupId = fingerprintId(row.ad_group_id);
+        for (const sliceDate of rowFingerprintSliceDates(source, row)) {
+            addFingerprintGroup(groups, customerId, source, 'account', sliceDate, row);
+            if (tableSupportsCampaign(source.table) && campaignId !== FINGERPRINT_ANY_ID) {
+                addFingerprintGroup(groups, customerId, source, 'campaign', sliceDate, row, campaignId);
+            }
+            if (tableSupportsAdGroup(source.table) && adGroupId !== FINGERPRINT_ANY_ID) {
+                addFingerprintGroup(groups, customerId, source, 'ad_group', sliceDate, row, campaignId, adGroupId);
+            }
+            if (source.parentAware && campaignId === FINGERPRINT_ANY_ID) {
+                addFingerprintGroup(groups, customerId, source, 'account_parent', sliceDate, row);
+            }
+            if (source.parentAware && campaignId !== FINGERPRINT_ANY_ID && adGroupId === FINGERPRINT_ANY_ID) {
+                addFingerprintGroup(groups, customerId, source, 'campaign_parent', sliceDate, row, campaignId);
+            }
+        }
+    }
+    return groups;
+}
+
+function buildSliceFingerprintRows(
+    source: WarehouseFingerprintSource,
+    previousRows: Record<string, any>[],
+    currentRows: Record<string, any>[],
+    customerId: string
+): WarehouseFingerprintRow[] {
+    const previousGroups = groupRowsForFingerprints(source, previousRows, customerId);
+    const currentGroups = groupRowsForFingerprints(source, currentRows, customerId);
+    const keys = new Set([...previousGroups.keys(), ...currentGroups.keys()]);
+    return Array.from(keys).map(key => {
+        const current = currentGroups.get(key);
+        const base = current?.row || previousGroups.get(key)!.row;
+        const rows = current?.rows || [];
+        return {
+            ...base,
+            row_count: rows.length,
+            fingerprint: sliceContentFingerprint(base, rows)
+        };
+    });
+}
+
+async function upsertWarehouseFingerprintRows(client: PoolClient, rows: WarehouseFingerprintRow[]): Promise<void> {
+    if (!rows.length) return;
+    const columns = ['customer_id', 'source_table', 'scope_level', 'slice_date', 'campaign_id', 'ad_group_id', 'row_count', 'fingerprint'];
+    const chunkSize = 300;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+        const chunk = rows.slice(i, i + chunkSize);
+        const values: any[] = [];
+        const tuples = chunk.map((row, rowIndex) => {
+            const rowValues = [
+                row.customer_id,
+                row.source_table,
+                row.scope_level,
+                row.slice_date,
+                row.campaign_id,
+                row.ad_group_id,
+                row.row_count,
+                row.fingerprint
+            ];
+            const placeholders = rowValues.map((value, columnIndex) => {
+                values.push(value);
+                return `$${rowIndex * columns.length + columnIndex + 1}`;
+            });
+            return `(${placeholders.join(', ')})`;
+        });
+        await client.query(
+            `INSERT INTO google_ads_warehouse_slice_fingerprints (${columns.join(', ')})
+             VALUES ${tuples.join(', ')}
+             ON CONFLICT (customer_id, source_table, scope_level, slice_date, campaign_id, ad_group_id)
+             DO UPDATE SET
+                row_count = EXCLUDED.row_count,
+                fingerprint = EXCLUDED.fingerprint,
+                computed_at = now()`,
+            values
+        );
+    }
+}
+
+async function selectFingerprintDateRows(
+    client: PoolClient,
+    table: string,
+    customerId: string,
+    startDate: string,
+    endDate: string
+): Promise<Record<string, any>[]> {
+    const dateColumn = table === 'google_ads_report_coverage' ? 'coverage_date' : 'date';
+    const { rows } = await client.query(
+        `SELECT * FROM ${table} WHERE customer_id = $1 AND ${dateColumn} BETWEEN $2::date AND $3::date`,
+        [customerId, startDate, endDate]
+    );
+    return rows.map(normalizeDbRow);
+}
+
+async function selectFingerprintCustomerRows(
+    client: PoolClient,
+    table: string,
+    customerId: string,
+    presentOnly = false
+): Promise<Record<string, any>[]> {
+    const presentSql = presentOnly ? ' AND present_in_latest_snapshot = true' : '';
+    const { rows } = await client.query(
+        `SELECT * FROM ${table} WHERE customer_id = $1${presentSql}`,
+        [customerId]
+    );
+    return rows.map(normalizeDbRow);
+}
+
+async function selectFingerprintCandidateRows(
+    client: PoolClient,
+    customerId: string,
+    startDate: string,
+    endDate: string
+): Promise<Record<string, any>[]> {
+    const { rows } = await client.query(
+        `SELECT * FROM candidate_signals
+         WHERE customer_id = $1
+           AND evidence_start_date <= $3::date
+           AND evidence_end_date >= $2::date`,
+        [customerId, startDate, endDate]
+    );
+    return rows.map(normalizeDbRow);
+}
+
+async function refreshDateWindowFingerprints(
+    client: PoolClient,
+    table: string,
+    customerId: string,
+    startDate: string,
+    endDate: string,
+    previousRows: Record<string, any>[]
+): Promise<void> {
+    const source = WAREHOUSE_FINGERPRINT_SOURCE_BY_TABLE.get(table);
+    if (!source) return;
+    const currentRows = await selectFingerprintDateRows(client, table, customerId, startDate, endDate);
+    await upsertWarehouseFingerprintRows(client, buildSliceFingerprintRows(source, previousRows, currentRows, customerId));
+}
+
+async function refreshCustomerFingerprints(
+    client: PoolClient,
+    table: string,
+    customerId: string,
+    previousRows: Record<string, any>[],
+    presentOnly = false
+): Promise<void> {
+    const source = WAREHOUSE_FINGERPRINT_SOURCE_BY_TABLE.get(table);
+    if (!source) return;
+    const currentRows = await selectFingerprintCustomerRows(client, table, customerId, presentOnly);
+    await upsertWarehouseFingerprintRows(client, buildSliceFingerprintRows(source, previousRows, currentRows, customerId));
+}
+
+function candidateFingerprintWindow(filters: DashboardFilters, rows: Record<string, any>[]): { startDate: string; endDate: string } {
+    let startDate = filters.startDate;
+    let endDate = filters.endDate;
+    for (const row of rows) {
+        const rowStart = isoDate(row.evidence_start_date);
+        const rowEnd = isoDate(row.evidence_end_date);
+        if (rowStart && rowStart < startDate) startDate = rowStart;
+        if (rowEnd && rowEnd > endDate) endDate = rowEnd;
+    }
+    return { startDate, endDate };
+}
+
+function candidateRowsForFingerprintWindow(rows: Record<string, any>[], startDate: string, endDate: string): Record<string, any>[] {
+    return rows
+        .map(row => ({
+            ...row,
+            __fingerprint_slice_start_date: startDate,
+            __fingerprint_slice_end_date: endDate
+        }))
+        .filter(row => candidateFingerprintDates(row).length > 0);
+}
+
+async function refreshCandidateFingerprints(
+    client: PoolClient,
+    customerId: string,
+    filters: DashboardFilters,
+    previousRows: Record<string, any>[],
+    insertedRows: Record<string, any>[]
+): Promise<void> {
+    const source = WAREHOUSE_FINGERPRINT_SOURCE_BY_TABLE.get('candidate_signals');
+    if (!source) return;
+    const window = candidateFingerprintWindow(filters, [...previousRows, ...insertedRows]);
+    const currentRows = await selectFingerprintCandidateRows(client, customerId, window.startDate, window.endDate);
+    await upsertWarehouseFingerprintRows(
+        client,
+        buildSliceFingerprintRows(
+            source,
+            candidateRowsForFingerprintWindow(previousRows, window.startDate, window.endDate),
+            candidateRowsForFingerprintWindow(currentRows, window.startDate, window.endDate),
+            customerId
+        )
+    );
+}
+
+export async function rebuildWarehouseSliceFingerprints(db: Db, customerId?: string): Promise<void> {
+    await withTransaction(db, async client => {
+        if (customerId) await client.query(`DELETE FROM google_ads_warehouse_slice_fingerprints WHERE customer_id = $1`, [customerId]);
+        else await client.query(`DELETE FROM google_ads_warehouse_slice_fingerprints`);
+
+        for (const source of WAREHOUSE_FINGERPRINT_SOURCES) {
+            let rows: Record<string, any>[];
+            if (source.dateMode === 'candidate') {
+                const query = customerId
+                    ? await client.query(`SELECT * FROM candidate_signals WHERE customer_id = $1`, [customerId])
+                    : await client.query(`SELECT * FROM candidate_signals`);
+                rows = query.rows.map(normalizeDbRow);
+            } else if (SNAPSHOT_FINGERPRINT_TABLES.includes(source.table)) {
+                const query = customerId
+                    ? await client.query(`SELECT * FROM ${source.table} WHERE customer_id = $1 AND present_in_latest_snapshot = true`, [customerId])
+                    : await client.query(`SELECT * FROM ${source.table} WHERE present_in_latest_snapshot = true`);
+                rows = query.rows.map(normalizeDbRow);
+            } else {
+                const query = customerId
+                    ? await client.query(`SELECT * FROM ${source.table} WHERE customer_id = $1`, [customerId])
+                    : await client.query(`SELECT * FROM ${source.table}`);
+                rows = query.rows.map(normalizeDbRow);
+            }
+            const groupedByCustomer = new Map<string, Record<string, any>[]>();
+            for (const row of rows) {
+                const rowCustomerId = cleanText(row.customer_id);
+                if (!rowCustomerId) continue;
+                const list = groupedByCustomer.get(rowCustomerId) || [];
+                list.push(row);
+                groupedByCustomer.set(rowCustomerId, list);
+            }
+            for (const [rowCustomerId, customerRows] of groupedByCustomer) {
+                await upsertWarehouseFingerprintRows(client, buildSliceFingerprintRows(source, [], customerRows, rowCustomerId));
+            }
+        }
+    });
+    invalidateAdsWarehouseRuntimeCaches();
+}
+
+async function ensureWarehouseSliceFingerprintBackfill(pool: Pool): Promise<void> {
+    const { rows } = await pool.query(
+        `SELECT EXISTS (SELECT 1 FROM google_ads_warehouse_slice_fingerprints LIMIT 1) AS has_fingerprints`
+    );
+    if (!rows[0]?.has_fingerprints) await rebuildWarehouseSliceFingerprints(pool);
+}
+
 export async function ensureAdsWarehouseSchema(pool: Pool): Promise<void> {
     await pool.query(WAREHOUSE_SCHEMA_SQL);
     await pool.query(`ALTER TABLE dashboard_payload_cache ADD COLUMN IF NOT EXISTS payload_bytes INTEGER NOT NULL DEFAULT 0`);
+    await ensureWarehouseSliceFingerprintBackfill(pool);
 }
 
 export async function startWarehouseRefreshRun(pool: Pool, input: {
@@ -1917,12 +2404,27 @@ export async function markReportCoverage(db: Db, input: {
         };
     });
     await withTransaction(db, async client => {
+        const previousRows = await selectFingerprintDateRows(
+            client,
+            'google_ads_report_coverage',
+            input.customerId,
+            input.startDate,
+            input.endDate
+        );
         await upsertRows(
             client,
             'google_ads_report_coverage',
             ['customer_id', 'report_name', 'coverage_date', 'status', 'row_count', 'run_id', 'fetched_at', 'error'],
             ['customer_id', 'report_name', 'coverage_date'],
             rows
+        );
+        await refreshDateWindowFingerprints(
+            client,
+            'google_ads_report_coverage',
+            input.customerId,
+            input.startDate,
+            input.endDate,
+            previousRows
         );
     });
     invalidateAdsWarehouseRuntimeCaches();
@@ -1999,9 +2501,13 @@ export async function replaceCandidateSignals(db: Db, customerId: string, filter
             params.push(filters.adGroupId);
             clauses.push(`(ad_group_id = $${params.length} OR ad_group_id IS NULL)`);
         }
+        const previousResult = await client.query(`SELECT * FROM candidate_signals WHERE ${clauses.join(' AND ')}`, params);
+        const previousRows = previousResult.rows.map(normalizeDbRow);
         await client.query(`DELETE FROM candidate_signals WHERE ${clauses.join(' AND ')}`, params);
         const enriched = rows.map(row => ({ ...row, customer_id: row.customer_id || customerId, run_id: runId, generated_at: new Date() }));
-        return insertRows(client, 'candidate_signals', candidateSignalColumns, enriched, runId);
+        const inserted = await insertRows(client, 'candidate_signals', candidateSignalColumns, enriched, runId);
+        await refreshCandidateFingerprints(client, customerId, filters, previousRows, enriched);
+        return inserted;
     });
     invalidateAdsWarehouseRuntimeCaches();
     return replaced;
@@ -2776,48 +3282,72 @@ export function dashboardCacheKey(rawFilters: DashboardFilters): string {
     ].join(':');
 }
 
-async function maxTimestamp(pool: Pool, sql: string, params: any[]): Promise<string | null> {
-    const { rows } = await pool.query(sql, params);
-    return isoDateTime(rows[0]?.max_ts);
+function fingerprintRowMatchesStrictScope(row: any, source: WarehouseFingerprintSource, filters: DashboardFilters): boolean {
+    if (filters.adGroupId && tableSupportsAdGroup(source.table)) {
+        if (row.scope_level !== 'ad_group') return false;
+        if (String(row.ad_group_id) !== filters.adGroupId) return false;
+        return !filters.campaignId || String(row.campaign_id) === filters.campaignId;
+    }
+    if (filters.campaignId && tableSupportsCampaign(source.table)) {
+        return row.scope_level === 'campaign' && String(row.campaign_id) === filters.campaignId;
+    }
+    return row.scope_level === 'account';
+}
+
+function fingerprintRowMatchesParentAwareScope(row: any, source: WarehouseFingerprintSource, filters: DashboardFilters): boolean {
+    if (filters.adGroupId && tableSupportsAdGroup(source.table)) {
+        if (row.scope_level === 'account_parent') return true;
+        if (row.scope_level === 'campaign_parent') {
+            return !filters.campaignId || String(row.campaign_id) === filters.campaignId;
+        }
+        if (row.scope_level !== 'ad_group') return false;
+        if (String(row.ad_group_id) !== filters.adGroupId) return false;
+        return !filters.campaignId || String(row.campaign_id) === filters.campaignId;
+    }
+    if (filters.campaignId && tableSupportsCampaign(source.table)) {
+        return row.scope_level === 'account_parent'
+            || (row.scope_level === 'campaign' && String(row.campaign_id) === filters.campaignId);
+    }
+    return row.scope_level === 'account';
+}
+
+function fingerprintRowMatchesFilters(row: any, filters: DashboardFilters): boolean {
+    const source = WAREHOUSE_FINGERPRINT_SOURCE_BY_TABLE.get(String(row.source_table || ''));
+    if (!source) return false;
+    const sliceDate = String(row.slice_date || '');
+    if (sliceDate !== FINGERPRINT_GLOBAL_SLICE && (sliceDate < filters.startDate || sliceDate > filters.endDate)) return false;
+    return source.parentAware
+        ? fingerprintRowMatchesParentAwareScope(row, source, filters)
+        : fingerprintRowMatchesStrictScope(row, source, filters);
 }
 
 async function computeWarehouseWatermark(pool: Pool, filters: DashboardFilters): Promise<string> {
-    const partQueries: Array<Promise<string | null>> = [];
-    for (const table of WATERMARK_FACT_TABLES) {
-        const { clauses, params } = scopeClauses(filters, '', table);
-        partQueries.push(maxTimestamp(pool, `SELECT MAX(fetched_at) AS max_ts FROM ${table} WHERE ${clauses.join(' AND ')}`, params));
-    }
-    for (const table of [
-        'google_ads_campaign_snapshot',
-        'google_ads_ad_group_snapshot',
-        'google_ads_configured_keywords',
-        'google_ads_quality_score_snapshot',
-        'google_ads_campaign_negatives',
-        'google_ads_ad_group_negatives',
-        'google_ads_account_negative_lists',
-        'google_ads_shared_negative_sets',
-        'google_ads_shared_negative_criteria',
-        'google_ads_campaign_shared_sets'
-    ]) {
-        const { clauses, params } = snapshotWatermarkScope(table, filters);
-        partQueries.push(maxTimestamp(pool, `SELECT MAX(last_seen_at) AS max_ts FROM ${table} WHERE ${clauses.join(' AND ')}`, params));
-    }
-    const candidateScope = candidateSignalWatermarkScope(filters);
-    partQueries.push(maxTimestamp(pool, `SELECT MAX(generated_at) AS max_ts FROM candidate_signals WHERE ${candidateScope.clauses.join(' AND ')}`, candidateScope.params));
-    partQueries.push(maxTimestamp(pool, `SELECT MAX(fetched_at) AS max_ts FROM google_ads_keyword_planner_ideas WHERE customer_id = $1`, [filters.customerId]));
-    partQueries.push(maxTimestamp(pool, `SELECT MAX(fetched_at) AS max_ts FROM google_ads_keyword_planner_historical WHERE customer_id = $1`, [filters.customerId]));
-    const auctionScope = optionalScopedWatermarkScope('google_ads_auction_insights_rows', filters);
-    partQueries.push(maxTimestamp(pool, `SELECT MAX(fetched_at) AS max_ts FROM google_ads_auction_insights_rows WHERE ${auctionScope.clauses.join(' AND ')}`, auctionScope.params));
-    partQueries.push(maxTimestamp(pool, `SELECT MAX(fetched_at) AS max_ts FROM google_ads_auction_insights_status WHERE customer_id = $1`, [filters.customerId]));
-    partQueries.push(maxTimestamp(
-        pool,
-        `SELECT MAX(fetched_at) AS max_ts
-         FROM google_ads_report_coverage
-         WHERE customer_id = $1 AND coverage_date BETWEEN $2::date AND $3::date`,
-        [filters.customerId, filters.startDate, filters.endDate]
-    ));
-    const parts = await Promise.all(partQueries);
-    return crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+    const { rows } = await pool.query(
+        `SELECT source_table, scope_level, slice_date, campaign_id, ad_group_id, row_count, fingerprint
+         FROM google_ads_warehouse_slice_fingerprints
+         WHERE customer_id = $1
+           AND (slice_date = $2 OR (slice_date >= $3 AND slice_date <= $4))
+         ORDER BY source_table ASC, scope_level ASC, slice_date ASC, campaign_id ASC, ad_group_id ASC`,
+        [filters.customerId, FINGERPRINT_GLOBAL_SLICE, filters.startDate, filters.endDate]
+    );
+    const matchingRows = rows
+        .map(normalizeDbRow)
+        .filter(row => fingerprintRowMatchesFilters(row, filters))
+        .map(row => ({
+            sourceTable: row.source_table,
+            scopeLevel: row.scope_level,
+            sliceDate: row.slice_date,
+            campaignId: row.campaign_id,
+            adGroupId: row.ad_group_id,
+            rowCount: Number(row.row_count || 0),
+            fingerprint: row.fingerprint || ''
+        }));
+    return crypto.createHash('sha256')
+        .update(stableJson({
+            sources: WAREHOUSE_FINGERPRINT_SOURCES.map(source => source.table).sort(),
+            rows: matchingRows
+        }))
+        .digest('hex');
 }
 
 const DEFAULT_DASHBOARD_DB_CACHE_MAX_BYTES = 2_000_000;

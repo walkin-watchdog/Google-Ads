@@ -175,7 +175,7 @@ describe('dashboard view warehouse bundles', () => {
         expect(signalSql).toContain('(ad_group_id = $5 OR ad_group_id IS NULL)');
     });
 
-    test('filtered watermarks include parent-scope candidate signal changes', async () => {
+    test('warehouse watermarks read maintained slice fingerprints for filtered views', async () => {
         const pool = new RecordingPool();
 
         await getWarehouseWatermark(pool, {
@@ -184,24 +184,28 @@ describe('dashboard view warehouse bundles', () => {
             adGroupId: '222'
         });
 
-        const signalSql = pool.queryFor('candidate_signals');
-        expect(signalSql).toContain('(campaign_id = $4 OR campaign_id IS NULL)');
-        expect(signalSql).toContain('(ad_group_id = $5 OR ad_group_id IS NULL)');
+        const watermarkSql = pool.queryFor('google_ads_warehouse_slice_fingerprints');
+        expect(watermarkSql).toContain('FROM google_ads_warehouse_slice_fingerprints');
+        expect(watermarkSql).not.toContain('candidate_signals');
+        expect(watermarkSql).not.toContain('MAX(');
     });
 
-    test('warehouse watermarks include auction insight status changes used by rank views', async () => {
+    test('warehouse watermarks avoid per-source timestamp scans', async () => {
         const pool = new RecordingPool();
 
         await getWarehouseWatermark(pool, filters);
 
-        expect(pool.queryFor('google_ads_auction_insights_status')).toContain('MAX(fetched_at)');
+        expect(pool.queryFor('google_ads_warehouse_slice_fingerprints')).toContain('source_table');
+        expect(pool.queried('google_ads_auction_insights_status')).toBe(false);
+        expect(pool.queries.some(query => query.includes('MAX('))).toBe(false);
     });
 
     test('warehouse watermarks are cached for repeated selected slices', async () => {
         const pool = new RecordingPool();
 
         await getWarehouseWatermark(pool, filters);
-        expect(pool.queries.some(query => query.includes('MAX('))).toBe(true);
+        expect(pool.queries.some(query => query.includes('FROM google_ads_warehouse_slice_fingerprints'))).toBe(true);
+        expect(pool.queries.some(query => query.includes('MAX('))).toBe(false);
 
         pool.queries = [];
         await getWarehouseWatermark(pool, filters);

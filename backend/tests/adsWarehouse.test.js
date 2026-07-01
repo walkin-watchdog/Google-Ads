@@ -38,13 +38,26 @@ class FakeWarehouseDb {
             google_ads_campaign_daily: [],
             google_ads_ad_group_daily: [],
             google_ads_keyword_daily: [],
-            google_ads_search_term_daily: []
+            google_ads_search_term_daily: [],
+            google_ads_report_coverage: [],
+            candidate_signals: [],
+            google_ads_warehouse_slice_fingerprints: []
         };
     }
 
     async query(sql, params = []) {
         const compact = sql.replace(/\s+/g, ' ').trim();
         this.queries.push(compact);
+        if (compact === 'DELETE FROM google_ads_warehouse_slice_fingerprints') {
+            this.tables.google_ads_warehouse_slice_fingerprints = [];
+            return { rows: [], rowCount: 0 };
+        }
+        if (compact === 'DELETE FROM google_ads_warehouse_slice_fingerprints WHERE customer_id = $1') {
+            const before = this.tables.google_ads_warehouse_slice_fingerprints.length;
+            this.tables.google_ads_warehouse_slice_fingerprints = this.tables.google_ads_warehouse_slice_fingerprints
+                .filter(row => row.customer_id !== params[0]);
+            return { rows: [], rowCount: before - this.tables.google_ads_warehouse_slice_fingerprints.length };
+        }
         const deleteMatch = compact.match(/^DELETE FROM ([a-z_]+) WHERE customer_id = \$1 AND date BETWEEN \$2::date AND \$3::date/);
         if (deleteMatch) {
             const table = deleteMatch[1];
@@ -57,6 +70,32 @@ class FakeWarehouseDb {
             return { rows: [], rowCount: before - this.tables[table].length };
         }
 
+        const deleteCustomerMatch = compact.match(/^DELETE FROM ([a-z_]+) WHERE customer_id = \$1$/);
+        if (deleteCustomerMatch) {
+            const table = deleteCustomerMatch[1];
+            const before = (this.tables[table] || []).length;
+            this.tables[table] = (this.tables[table] || []).filter(row => row.customer_id !== params[0]);
+            return { rows: [], rowCount: before - this.tables[table].length };
+        }
+
+        if (compact.startsWith('DELETE FROM candidate_signals WHERE')) {
+            const before = this.tables.candidate_signals.length;
+            this.tables.candidate_signals = this.tables.candidate_signals.filter(row => {
+                if (row.customer_id !== params[0]) return true;
+                if (row.evidence_start_date < params[1] || row.evidence_end_date > params[2]) return true;
+                if (compact.includes('(campaign_id = $4 OR campaign_id IS NULL)')) {
+                    const matchesCampaign = String(row.campaign_id || '') === String(params[3]) || !row.campaign_id;
+                    if (!matchesCampaign) return true;
+                }
+                if (compact.includes('(ad_group_id = $5 OR ad_group_id IS NULL)')) {
+                    const matchesAdGroup = String(row.ad_group_id || '') === String(params[4]) || !row.ad_group_id;
+                    if (!matchesAdGroup) return true;
+                }
+                return false;
+            });
+            return { rows: [], rowCount: before - this.tables.candidate_signals.length };
+        }
+
         const insert = compact.match(/^INSERT INTO ([a-z_]+) \(([^)]+)\)/);
         if (insert) {
             const table = insert[1];
@@ -67,12 +106,27 @@ class FakeWarehouseDb {
                 columns.forEach((column, columnIndex) => {
                     row[column] = params[index + columnIndex];
                 });
-                this.tables[table].push(row);
+                if (table === 'google_ads_warehouse_slice_fingerprints') {
+                    const key = existing => [
+                        existing.customer_id,
+                        existing.source_table,
+                        existing.scope_level,
+                        existing.slice_date,
+                        existing.campaign_id,
+                        existing.ad_group_id
+                    ].join('|');
+                    const rowKey = key(row);
+                    const existingIndex = this.tables[table].findIndex(existing => key(existing) === rowKey);
+                    if (existingIndex >= 0) this.tables[table][existingIndex] = row;
+                    else this.tables[table].push(row);
+                } else {
+                    this.tables[table].push(row);
+                }
             }
             return { rows: [], rowCount: params.length / columns.length };
         }
 
-        const select = compact.match(/^SELECT \* FROM ([a-z_]+)/);
+        const select = compact.match(/^SELECT .+ FROM ([a-z_]+)/);
         if (select) {
             return { rows: this.selectRows(select[1], compact, params) };
         }
@@ -87,6 +141,14 @@ class FakeWarehouseDb {
             .filter(row => {
                 if (sql.includes('customer_id = $1') && row.customer_id !== params[0]) return false;
                 if (sql.includes('date BETWEEN $2::date AND $3::date') && (row.date < params[1] || row.date > params[2])) return false;
+                if (sql.includes('coverage_date BETWEEN $2::date AND $3::date') && (row.coverage_date < params[1] || row.coverage_date > params[2])) return false;
+                if (sql.includes('evidence_start_date >= $2::date') && row.evidence_start_date < params[1]) return false;
+                if (sql.includes('evidence_end_date <= $3::date') && row.evidence_end_date > params[2]) return false;
+                if (sql.includes('evidence_start_date <= $3::date') && row.evidence_start_date > params[2]) return false;
+                if (sql.includes('evidence_end_date >= $2::date') && row.evidence_end_date < params[1]) return false;
+                if (sql.includes('slice_date = $2 OR (slice_date >= $3 AND slice_date <= $4)')) {
+                    if (row.slice_date !== params[1] && (row.slice_date < params[2] || row.slice_date > params[3])) return false;
+                }
                 if (sql.includes('campaign_id = $4') && String(row.campaign_id) !== String(params[3])) return false;
                 if (sql.includes('ad_group_id = $5') && String(row.ad_group_id) !== String(params[4])) return false;
                 if (sql.includes('present_in_latest_snapshot = true') && row.present_in_latest_snapshot !== true) return false;
@@ -259,6 +321,7 @@ function duplicatePkCount(rows, keyFn) {
 async function deleteCustomerRows(pool, customerId) {
     for (const table of [
         'dashboard_payload_cache',
+        'google_ads_warehouse_slice_fingerprints',
         'google_ads_report_coverage',
         'google_ads_campaign_daily'
     ]) {
@@ -267,7 +330,7 @@ async function deleteCustomerRows(pool, customerId) {
 }
 
 describe('ads warehouse repository', () => {
-    test('warehouse schema includes timestamp indexes for dashboard watermark lookups', async () => {
+    test('warehouse schema includes maintained fingerprint storage for dashboard watermarks', async () => {
         const queries = [];
         const pool = {
             async query(sql) {
@@ -279,6 +342,8 @@ describe('ads warehouse repository', () => {
         await ensureAdsWarehouseSchema(pool);
 
         const schemaSql = queries.join(' ');
+        expect(schemaSql).toContain('google_ads_warehouse_slice_fingerprints');
+        expect(schemaSql).toContain('google_ads_warehouse_slice_fingerprints_lookup_idx');
         expect(schemaSql).toContain('google_ads_search_term_daily_watermark_idx');
         expect(schemaSql).toContain('google_ads_expanded_landing_page_daily_watermark_idx');
         expect(schemaSql).toContain('google_ads_configured_keywords_watermark_idx');
@@ -296,8 +361,9 @@ describe('ads warehouse repository', () => {
             endDate: '2026-01-01'
         };
 
-        await getWarehouseWatermark(db, filters);
-        expect(db.queries.some(query => query.includes('MAX('))).toBe(true);
+        const firstWatermark = await getWarehouseWatermark(db, filters);
+        expect(db.queries.some(query => query.includes('FROM google_ads_warehouse_slice_fingerprints'))).toBe(true);
+        expect(db.queries.some(query => query.includes('MAX('))).toBe(false);
 
         db.queries = [];
         await getWarehouseWatermark(db, filters);
@@ -317,8 +383,117 @@ describe('ads warehouse repository', () => {
         }], 'run_after_watermark');
 
         db.queries = [];
-        await getWarehouseWatermark(db, filters);
-        expect(db.queries.some(query => query.includes('MAX('))).toBe(true);
+        const secondWatermark = await getWarehouseWatermark(db, filters);
+        expect(secondWatermark).not.toBe(firstWatermark);
+        expect(db.queries.some(query => query.includes('FROM google_ads_warehouse_slice_fingerprints'))).toBe(true);
+        expect(db.queries.some(query => query.includes('MAX('))).toBe(false);
+        clearAdsWarehouseRuntimeCaches();
+    });
+
+    test('campaign slice watermarks ignore unrelated campaign-only fingerprint changes', async () => {
+        clearAdsWarehouseRuntimeCaches();
+        const db = new FakeWarehouseDb();
+        const customerId = 'fixture_customer';
+        const campaign111 = {
+            customer_id: customerId,
+            date: '2026-01-01',
+            campaign_id: '111',
+            campaign_name: 'Campaign 111',
+            cost_micros: 1_000_000,
+            clicks: 1,
+            impressions: 100,
+            conversions: 0,
+            conversions_value: 0,
+            raw_payload: { 'segments.date': '2026-01-01', 'campaign.id': '111' }
+        };
+        const campaign222 = {
+            customer_id: customerId,
+            date: '2026-01-01',
+            campaign_id: '222',
+            campaign_name: 'Campaign 222',
+            cost_micros: 2_000_000,
+            clicks: 2,
+            impressions: 200,
+            conversions: 0,
+            conversions_value: 0,
+            raw_payload: { 'segments.date': '2026-01-01', 'campaign.id': '222' }
+        };
+
+        await replaceCampaignDailyWindow(db, customerId, '2026-01-01', '2026-01-01', [campaign111, campaign222], 'run_1');
+        const campaign111Watermark = await getWarehouseWatermark(db, {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-01',
+            campaignId: '111'
+        });
+        const accountWatermark = await getWarehouseWatermark(db, {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-01'
+        });
+
+        await replaceCampaignDailyWindow(db, customerId, '2026-01-01', '2026-01-01', [
+            campaign111,
+            {
+                ...campaign222,
+                cost_micros: 3_000_000,
+                raw_payload: { 'segments.date': '2026-01-01', 'campaign.id': '222', changed: true }
+            }
+        ], 'run_2');
+
+        const nextCampaign111Watermark = await getWarehouseWatermark(db, {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-01',
+            campaignId: '111'
+        });
+        const nextAccountWatermark = await getWarehouseWatermark(db, {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-01'
+        });
+
+        expect(nextCampaign111Watermark).toBe(campaign111Watermark);
+        expect(nextAccountWatermark).not.toBe(accountWatermark);
+        clearAdsWarehouseRuntimeCaches();
+    });
+
+    test('deleted slices keep tombstone fingerprints that invalidate stale watermarks', async () => {
+        clearAdsWarehouseRuntimeCaches();
+        const db = new FakeWarehouseDb();
+        const customerId = 'fixture_customer';
+        const filters = {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-01',
+            campaignId: '111'
+        };
+
+        await replaceCampaignDailyWindow(db, customerId, '2026-01-01', '2026-01-01', [{
+            customer_id: customerId,
+            date: '2026-01-01',
+            campaign_id: '111',
+            campaign_name: 'Campaign 111',
+            cost_micros: 1_000_000,
+            clicks: 1,
+            impressions: 100,
+            conversions: 0,
+            conversions_value: 0,
+            raw_payload: { 'segments.date': '2026-01-01', 'campaign.id': '111' }
+        }], 'run_with_rows');
+        const withRows = await getWarehouseWatermark(db, filters);
+
+        await replaceCampaignDailyWindow(db, customerId, '2026-01-01', '2026-01-01', [], 'run_delete_rows');
+        const afterDelete = await getWarehouseWatermark(db, filters);
+        const tombstone = db.tables.google_ads_warehouse_slice_fingerprints.find(row =>
+            row.source_table === 'google_ads_campaign_daily'
+            && row.scope_level === 'campaign'
+            && row.campaign_id === '111'
+            && row.slice_date === '2026-01-01'
+        );
+
+        expect(afterDelete).not.toBe(withRows);
+        expect(tombstone.row_count).toBe(0);
         clearAdsWarehouseRuntimeCaches();
     });
 
@@ -422,6 +597,107 @@ describe('ads warehouse repository', () => {
         expect(deleteQuery.sql).toContain('(campaign_id = $4 OR campaign_id IS NULL)');
         expect(deleteQuery.sql).toContain('(ad_group_id = $5 OR ad_group_id IS NULL)');
         expect(deleteQuery.params).toEqual(['1234567890', '2026-01-01', '2026-01-31', '111', '222']);
+    });
+
+    test('parent-scope candidate fingerprints invalidate selected child watermarks', async () => {
+        clearAdsWarehouseRuntimeCaches();
+        const db = new FakeWarehouseDb();
+        const customerId = '1234567890';
+        const accountFilters = {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-31'
+        };
+        const childFilters = {
+            ...accountFilters,
+            campaignId: '111',
+            adGroupId: '222'
+        };
+
+        const before = await getWarehouseWatermark(db, childFilters);
+        await replaceCandidateSignals(db, customerId, accountFilters, [{
+            signal_id: 'account-risk',
+            customer_id: customerId,
+            signal_type: 'DATA_COVERAGE_RISK',
+            severity: 'high',
+            campaign_id: null,
+            ad_group_id: null,
+            evidence_start_date: '2026-01-01',
+            evidence_end_date: '2026-01-31',
+            payload: { signal_id: 'account-risk', version: 1 }
+        }], 'signal_run_1');
+        const afterParentSignal = await getWarehouseWatermark(db, childFilters);
+
+        await replaceCandidateSignals(db, customerId, accountFilters, [{
+            signal_id: 'account-risk',
+            customer_id: customerId,
+            signal_type: 'DATA_COVERAGE_RISK',
+            severity: 'high',
+            campaign_id: null,
+            ad_group_id: null,
+            evidence_start_date: '2026-01-01',
+            evidence_end_date: '2026-01-31',
+            payload: { signal_id: 'account-risk', version: 2 }
+        }], 'signal_run_2');
+        const afterParentSignalChange = await getWarehouseWatermark(db, childFilters);
+
+        expect(afterParentSignal).not.toBe(before);
+        expect(afterParentSignalChange).not.toBe(afterParentSignal);
+        clearAdsWarehouseRuntimeCaches();
+    });
+
+    test('candidate fingerprint refresh does not rewrite dates outside the affected window', async () => {
+        clearAdsWarehouseRuntimeCaches();
+        const db = new FakeWarehouseDb();
+        const customerId = '1234567890';
+        const decemberFilters = {
+            customerId,
+            startDate: '2025-12-20',
+            endDate: '2025-12-25'
+        };
+        const januaryFilters = {
+            customerId,
+            startDate: '2026-01-01',
+            endDate: '2026-01-31'
+        };
+
+        await replaceCandidateSignals(db, customerId, {
+            customerId,
+            startDate: '2025-12-20',
+            endDate: '2026-01-15'
+        }, [
+            {
+                signal_id: 'spanning-signal',
+                customer_id: customerId,
+                signal_type: 'DATA_COVERAGE_RISK',
+                severity: 'high',
+                campaign_id: null,
+                ad_group_id: null,
+                evidence_start_date: '2025-12-20',
+                evidence_end_date: '2026-01-15',
+                payload: { signal_id: 'spanning-signal' }
+            },
+            {
+                signal_id: 'december-only-signal',
+                customer_id: customerId,
+                signal_type: 'DATA_COVERAGE_RISK',
+                severity: 'medium',
+                campaign_id: null,
+                ad_group_id: null,
+                evidence_start_date: '2025-12-20',
+                evidence_end_date: '2025-12-25',
+                payload: { signal_id: 'december-only-signal' }
+            }
+        ], 'signal_seed');
+
+        const beforeDecemberRepair = await getWarehouseWatermark(db, decemberFilters);
+        const beforeJanuaryRepair = await getWarehouseWatermark(db, januaryFilters);
+
+        await replaceCandidateSignals(db, customerId, januaryFilters, [], 'signal_january_repair');
+
+        expect(await getWarehouseWatermark(db, decemberFilters)).toBe(beforeDecemberRepair);
+        expect(await getWarehouseWatermark(db, januaryFilters)).toBe(beforeJanuaryRepair);
+        clearAdsWarehouseRuntimeCaches();
     });
 
     test('skips DB dashboard cache writes when payload exceeds configured byte limit', async () => {
@@ -551,6 +827,7 @@ describe('ads warehouse repository', () => {
             raw_payload: { 'segments.date': '2026-01-01', 'campaign.id': '111' }
         }], 'campaign_only');
 
+        db.queries = [];
         await getDashboardReportBundle(db, {
             customerId,
             startDate: '2026-01-01',
