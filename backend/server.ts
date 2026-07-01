@@ -63,7 +63,7 @@ import {
 import { getCandidateSignalsPayload, getCompactDecisionContext, getProposalContext } from './lib/mcpDashboardContext';
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 7860;
 const DEFAULT_DASHBOARD_DB_TIMEOUT_MS = 15000;
 const configuredDashboardDbTimeoutMs = Number(process.env.DASHBOARD_DB_TIMEOUT_MS || DEFAULT_DASHBOARD_DB_TIMEOUT_MS);
 const dashboardDbTimeoutMs = Number.isFinite(configuredDashboardDbTimeoutMs) && configuredDashboardDbTimeoutMs > 0

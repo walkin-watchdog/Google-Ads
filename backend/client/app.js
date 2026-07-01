@@ -164,6 +164,7 @@ let dashboardData = null;
 let charts = {};
 let API_BASE_GLOBAL = '';
 let API_KEY_GLOBAL = '';
+let HF_TOKEN_GLOBAL = '';
 const TAB_DASHBOARD_VIEWS = {
     overview: 'overview',
     campaigns: 'performance',
@@ -178,14 +179,21 @@ const dashboardViewPromises = new Map();
 let dashboardLoadGeneration = 0;
 
 function authHeaders(extra = {}) {
-    return API_KEY_GLOBAL
-        ? { ...extra, 'Authorization': `Bearer ${API_KEY_GLOBAL}` }
-        : { ...extra };
+    const headers = { ...extra };
+    if (HF_TOKEN_GLOBAL) {
+        headers['Authorization'] = `Bearer ${HF_TOKEN_GLOBAL}`;
+        if (API_KEY_GLOBAL) {
+            headers['X-API-Key'] = API_KEY_GLOBAL;
+        }
+    } else if (API_KEY_GLOBAL) {
+        headers['Authorization'] = `Bearer ${API_KEY_GLOBAL}`;
+    }
+    return headers;
 }
 
 function dashboardFetch(url, options = {}) {
     return fetch(url, {
-        credentials: 'include',
+        credentials: API_KEY_GLOBAL ? 'omit' : 'include',
         ...options,
         headers: authHeaders(options.headers || {})
     });
@@ -258,16 +266,24 @@ async function init() {
     const isFileMode = window.location.protocol === 'file:';
     const envApiBase = window.ENV && typeof window.ENV.API_BASE === 'string' ? window.ENV.API_BASE : null;
     const envApiKey = window.ENV && typeof window.ENV.API_KEY === 'string' ? window.ENV.API_KEY : null;
+    const envHfToken = window.ENV && typeof window.ENV.HF_TOKEN === 'string' ? window.ENV.HF_TOKEN : null;
     const hostedCookieMode = !isFileMode && envApiBase === '' && envApiKey === '';
     let API_BASE = hostedCookieMode ? '' : (envApiBase || localStorage.getItem('API_BASE') || '');
     let API_KEY = hostedCookieMode ? '' : (envApiKey || localStorage.getItem('API_KEY') || '');
+    let HF_TOKEN = hostedCookieMode ? '' : (envHfToken || localStorage.getItem('HF_TOKEN') || '');
 
     if (isFileMode && (!API_BASE || !API_KEY)) {
-        API_BASE = prompt('Enter the backend API Base URL (e.g. https://my-app.onrender.com or http://localhost:8080):', API_BASE || 'http://localhost:8080');
+        API_BASE = prompt('Enter the backend API Base URL (e.g. https://my-app.onrender.com or http://localhost:7860):', API_BASE || 'http://localhost:7860');
         API_KEY = prompt('Enter your Secret API Key:', API_KEY || '');
+        if (API_BASE && API_BASE.includes('.hf.space') && !HF_TOKEN) {
+            HF_TOKEN = prompt('Enter your Hugging Face Access Token (for Private Space access):', HF_TOKEN || '');
+        }
         if (API_BASE && API_KEY) {
             localStorage.setItem('API_BASE', API_BASE);
             localStorage.setItem('API_KEY', API_KEY);
+            if (HF_TOKEN) {
+                localStorage.setItem('HF_TOKEN', HF_TOKEN);
+            }
         } else {
             els.kpiGrid.innerHTML = `<p style="color:var(--danger)">API credentials required to load dashboard.</p>`;
             return;
@@ -275,6 +291,7 @@ async function init() {
     }
     API_BASE_GLOBAL = API_BASE;
     API_KEY_GLOBAL = API_KEY;
+    HF_TOKEN_GLOBAL = HF_TOKEN;
     document.body.classList.toggle('session-auth-mode', !API_KEY_GLOBAL);
     if (!API_KEY_GLOBAL && els.refreshBtn) {
         els.refreshBtn.hidden = true;

@@ -167,6 +167,14 @@ function clearCookieOptions(req?: Request, path = '/'): { path: string; secure: 
 }
 
 function bearerToken(req: Request): string | null {
+  const customKey = req.headers['x-api-key'];
+  if (customKey && typeof customKey === 'string') {
+    return customKey;
+  }
+  const queryKey = req.query?.key;
+  if (queryKey && typeof queryKey === 'string') {
+    return queryKey;
+  }
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   return authHeader.slice(7);

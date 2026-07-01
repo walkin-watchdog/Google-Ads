@@ -2,9 +2,10 @@
 const readline = require('readline');
 
 // The MCP uses the API Base and API Key from the environment
-let API_BASE = process.env.API_BASE || 'http://localhost:8080';
+let API_BASE = process.env.API_BASE || 'http://localhost:7860';
 if (API_BASE && !API_BASE.startsWith('http')) API_BASE = 'http://' + API_BASE;
 const API_KEY = process.env.SECRET_API_KEY;
+const HF_TOKEN = process.env.HF_TOKEN || '';
 const DEFAULT_FETCH_TIMEOUT_MS = 60000;
 const configuredFetchTimeoutMs = Number(process.env.MCP_FETCH_TIMEOUT_MS || DEFAULT_FETCH_TIMEOUT_MS);
 const FETCH_TIMEOUT_MS = Number.isFinite(configuredFetchTimeoutMs) && configuredFetchTimeoutMs > 0
@@ -18,6 +19,17 @@ let skillRead = !REQUIRE_SKILL_READ;
 if (!API_KEY) {
     console.error('ERROR: SECRET_API_KEY environment variable is required.');
     process.exit(1);
+}
+
+function mcpHeaders(extraHeaders = {}) {
+    const headers = { ...extraHeaders };
+    if (HF_TOKEN) {
+        headers['Authorization'] = `Bearer ${HF_TOKEN}`;
+        headers['X-API-Key'] = API_KEY;
+    } else {
+        headers['Authorization'] = `Bearer ${API_KEY}`;
+    }
+    return headers;
 }
 
 function skillInstallMessage() {
@@ -161,7 +173,7 @@ rl.on('line', async (line) => {
             try {
                 const proxyRes = await fetchWithTimeout(`${API_BASE}/api/mcp`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
+                    headers: mcpHeaders({ 'Content-Type': 'application/json' }),
                     body: JSON.stringify({ method: 'tools/list' })
                 });
                 const remoteData = proxyRes.ok ? await proxyRes.json() : { tools: [] };
@@ -243,7 +255,7 @@ rl.on('line', async (line) => {
                     const args = req.params.arguments || {};
                     const proxyRes = await fetchWithTimeout(`${API_BASE}/api/mcp`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
+                        headers: mcpHeaders({ 'Content-Type': 'application/json' }),
                         body: JSON.stringify({
                             method: 'tools/call',
                             params: { name: 'get_dashboard_data', arguments: dashboardArguments(args) }
@@ -263,7 +275,7 @@ rl.on('line', async (line) => {
                 try {
                     const proxyRes = await fetchWithTimeout(`${API_BASE}/api/mcp`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_KEY}` },
+                        headers: mcpHeaders({ 'Content-Type': 'application/json' }),
                         body: JSON.stringify({ method: 'tools/call', params: req.params })
                     });
 
